@@ -90,9 +90,31 @@ curl https://<your-service-url>/version    # {"version":"<commit sha>","env":"pr
 
 From now on, every change goes through a pull request, and merging to `main` deploys it.
 
+## 6. Phase 1: run the agent locally
+
+1. **Groq API key:** console.groq.com -> API Keys -> create -> add `GROQ_API_KEY=...` to `.env`.
+2. **Test repository:** create an empty **public** repo `agent-sandbox-repo` on GitHub, then push
+   the practice project into it:
+   ```bash
+   cp -r evals/sample_repo /tmp/agent-sandbox-repo && cd /tmp/agent-sandbox-repo
+   git init -b main && git add . && git commit -m "chore: sample project"
+   git remote add origin https://github.com/<you>/agent-sandbox-repo.git && git push -u origin main
+   ```
+3. **GitHub token for the agent:** GitHub -> Settings -> Developer settings -> Personal access
+   tokens -> **Fine-grained tokens** -> Generate:
+   - Repository access: **Only select repositories** -> `agent-sandbox-repo`
+   - Permissions: **Contents: Read and write**, **Pull requests: Read and write**
+   - Add it to `.env` as `GITHUB_TOKEN=...` (replaced by a GitHub App in phase 4)
+4. Run:
+   ```bash
+   uv run coding-agent run --repo https://github.com/<you>/agent-sandbox-repo.git \
+     --task "Add a divide(a, b) function that raises ValueError on zero, with tests"
+   ```
+
 ## Coming in later phases
 
 | Phase | Setup needed |
 |---|---|
-| 1 | GitHub App (contents + pull requests on test repos), Groq API key, a public test repo |
+| 2 | Production Groq key + GitHub token as Northflank secrets |
+| 4 | GitHub App instead of the personal token |
 | 6 | Langfuse project keys, optional Cerebras / Anthropic keys |

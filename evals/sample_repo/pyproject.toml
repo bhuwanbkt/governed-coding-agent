@@ -1,0 +1,9 @@
+[project]
+name = "agent-sandbox-repo"
+version = "0.1.0"
+description = "Practice repository for the governed coding agent"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

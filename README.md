@@ -8,7 +8,7 @@ plans the change, writes the code, runs the tests and reviews the diff, then **w
 human to approve** before it pushes a branch and opens a pull request. Every tool call is
 permission-checked, recorded in an append-only audit log, traced and measured.
 
-> **Status:** Phase 0 (foundation) complete — CI/CD, database schema and service skeleton.
+> **Status:** Phase 1 (core loop) — a single governed coding agent runs from the CLI.
 > See the [roadmap](#roadmap).
 
 ## Architecture
@@ -67,6 +67,22 @@ uv run uvicorn coding_agent.api.main:app --reload --port 8080
 
 Open http://localhost:8080/docs. Or run the whole stack in containers: `docker compose up --build`.
 
+### Run the agent (phase 1 CLI)
+
+```bash
+# Offline demo: scripted LLM, local copy of the sample repo, no keys needed
+uv run coding-agent run --llm fake --repo <git-url-of-agent-sandbox-repo> \
+  --task "Add a divide(a, b) function that raises ValueError on zero, with tests"
+
+# Real run: needs GROQ_API_KEY and GITHUB_TOKEN in .env
+uv run coding-agent run --repo https://github.com/<you>/agent-sandbox-repo \
+  --task "Add a divide(a, b) function that raises ValueError on zero, with tests"
+```
+
+The agent clones the repo into `workspaces/<job-id>/`, edits code, runs the tests (retrying with
+the failure output if they fail), then **stops and shows you the diff**. Nothing is pushed unless
+you type `yes`. Then it pushes `agent/<job-id>` and opens a pull request.
+
 ### Tests
 
 ```bash
@@ -102,10 +118,15 @@ Setup steps for Neon, Northflank and GitHub are in [docs/setup.md](docs/setup.md
 
 ```
 src/coding_agent/
+  agent/          LangGraph workflow, governed MCP Toolbox, LLM factory, job runner
+  mcp_servers/    workspace MCP server (sandboxed files, tests, git)
+  prompts/        versioned prompt templates + registry
   api/            FastAPI app, middleware (UI arrives in phase 5)
   db/             engine and data access
   observability/  structured logging (tracing/metrics/masking later)
+  cli.py          `coding-agent` command
   config.py       typed settings from env vars
+evals/sample_repo/  practice repository the agent edits in demos and evals
 migrations/       Alembic migrations (hand-written SQL)
 tests/            unit/ and integration/
 docs/             architecture, ADRs, runbook, setup
@@ -114,7 +135,7 @@ docs/             architecture, ADRs, runbook, setup
 ## Roadmap
 
 - [x] **0 Foundation** — repo hygiene, CI/CD to Northflank, schema, health checks
-- [ ] **1 Core loop** — MCP workspace server, single agent, push to a branch
+- [x] **1 Core loop** — MCP workspace server, single agent, prompt registry, push + PR
 - [ ] **2 API + worker** — Postgres job queue, audit logging, restart recovery
 - [ ] **3 Multi-agent + retrieval** — supervisor + 5 agents, LlamaIndex
 - [ ] **4 Governance** — permissions, guards, approvals, budgets, masking
