@@ -1,0 +1,8 @@
+# Default reviewer for everything. Replace with your GitHub username.
+*                       @bhuwanbkt
+
+# Governance-critical paths: changes here deserve extra scrutiny.
+/migrations/            @bhuwanbkt
+/.github/workflows/     @bhuwanbkt
+/src/coding_agent/agent/permissions.py  @bhuwanbkt
+/src/coding_agent/agent/guards.py       @bhuwanbkt

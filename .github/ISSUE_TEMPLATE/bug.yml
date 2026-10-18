@@ -1,0 +1,23 @@
+name: Bug
+description: Something is broken
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+  - type: input
+    id: ids
+    attributes:
+      label: job_id / request_id / commit SHA
+      description: From the UI, the X-Request-ID header, or /version
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs (secrets removed)
+      render: json

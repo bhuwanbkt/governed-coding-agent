@@ -1,0 +1,38 @@
+# Local development stack:  docker compose up --build
+#   API      -> http://localhost:8080  (docs at /docs)
+#   Postgres -> localhost:5432  (pgvector image, ready for phase 6 retrieval)
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+      POSTGRES_DB: agent
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
+      interval: 3s
+      retries: 20
+
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql://agent:agent@db:5432/agent
+    depends_on:
+      db: { condition: service_healthy }
+
+  api:
+    build:
+      context: .
+      args: { GIT_SHA: local }
+    environment:
+      APP_ENV: local
+      DATABASE_URL: postgresql://agent:agent@db:5432/agent
+    ports: ["8080:8080"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+volumes:
+  pgdata:

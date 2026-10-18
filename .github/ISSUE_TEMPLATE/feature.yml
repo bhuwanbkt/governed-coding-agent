@@ -1,0 +1,23 @@
+name: Feature
+description: Plan a new capability or phase task
+labels: [enhancement]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should be possible after this is done?
+    validations: { required: true }
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: |
+        - [ ] ...
+        - [ ] Tests cover ...
+    validations: { required: true }
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Phase
+      options: ["0 Foundation", "1 Core loop", "2 API + worker", "3 Multi-agent + retrieval", "4 Governance", "5 UI + login", "6 Evals + observability", "7 Release"]

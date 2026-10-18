@@ -1,0 +1,113 @@
+name: Deploy to production
+
+# Every push to main: run CI -> build image -> migrate Neon -> deploy to Northflank
+# -> verify the new version is live -> roll back automatically if it isn't.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: production
+  cancel-in-progress: false   # never interrupt a deploy halfway
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    environment:
+      name: production          # add yourself as a required reviewer for a manual gate
+      url: ${{ vars.PROD_URL }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Image name (GHCR requires lowercase)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image (tagged with commit SHA)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: GIT_SHA=${{ github.sha }}
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Find previous image for rollback
+        id: previous
+        run: |
+          prev="${{ github.event.before }}"
+          if [[ -n "$prev" && "$prev" != 0000000000000000000000000000000000000000 ]] \
+             && docker buildx imagetools inspect "$IMAGE:$prev" >/dev/null 2>&1; then
+            echo "tag=$prev" >> "$GITHUB_OUTPUT"
+          else
+            echo "No previous image found; automatic rollback unavailable for this deploy."
+          fi
+
+      - uses: astral-sh/setup-uv@v5
+      - name: Run database migrations (Neon, direct connection)
+        run: |
+          uv sync --locked --no-dev
+          uv run --no-dev alembic upgrade head
+        env:
+          DATABASE_URL: ${{ secrets.NEON_MIGRATION_DATABASE_URL }}
+
+      - name: Deploy to Northflank
+        uses: northflank/deploy-to-northflank@v1
+        with:
+          northflank-api-key: ${{ secrets.NORTHFLANK_API_KEY }}
+          project-id: ${{ vars.NF_PROJECT_ID }}
+          service-id: ${{ vars.NF_SERVICE_ID }}
+          image-path: ${{ env.IMAGE }}:${{ github.sha }}
+          credentials-id: ${{ vars.NF_CREDENTIALS_ID }}
+
+      - name: Smoke test (new version live and ready)
+        run: |
+          for i in $(seq 1 30); do
+            live=$(curl -fsS "${{ vars.PROD_URL }}/version" | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])' || true)
+            if [[ "$live" == "${{ github.sha }}" ]] && curl -fsS "${{ vars.PROD_URL }}/readyz" >/dev/null; then
+              echo "Version ${{ github.sha }} is live and ready."; exit 0
+            fi
+            echo "Waiting for new version (attempt $i, live=${live:-none})"; sleep 10
+          done
+          echo "::error::New version did not become healthy in time"; exit 1
+
+      - name: Roll back to previous image
+        if: failure() && steps.previous.outputs.tag != ''
+        uses: northflank/deploy-to-northflank@v1
+        with:
+          northflank-api-key: ${{ secrets.NORTHFLANK_API_KEY }}
+          project-id: ${{ vars.NF_PROJECT_ID }}
+          service-id: ${{ vars.NF_SERVICE_ID }}
+          image-path: ${{ env.IMAGE }}:${{ steps.previous.outputs.tag }}
+          credentials-id: ${{ vars.NF_CREDENTIALS_ID }}
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          {
+            echo "### Deploy ${{ job.status }}"
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo "- Image: \`$IMAGE:${{ github.sha }}\`"
+            echo "- Rollback target: \`${{ steps.previous.outputs.tag || 'none' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
