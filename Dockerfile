@@ -42,6 +42,7 @@ ARG GIT_SHA=dev
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     APP_VERSION=${GIT_SHA} \
+    WORKSPACES_DIR=/tmp/workspaces \
     PORT=8080
 
 USER app

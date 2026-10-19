@@ -111,10 +111,25 @@ From now on, every change goes through a pull request, and merging to `main` dep
      --task "Add a divide(a, b) function that raises ValueError on zero, with tests"
    ```
 
+## 7. Phase 2: job API and worker in production
+
+Add these to the Northflank service (Environment / secret group) **before merging phase 2**.
+The app refuses to start in production without `ALLOWED_REPO_PREFIXES`, and the deploy would
+roll back.
+
+| Variable | Value |
+|---|---|
+| `ALLOWED_REPO_PREFIXES` | `https://github.com/bhuwanbkt/` (comma-separated list) |
+| `API_KEYS` | `alice:<key>,bob:<key>`; keys 16+ chars, e.g. `openssl rand -hex 24` |
+| `RUN_WORKER_IN_API` | `true` (free tier: worker runs inside the API, ADR 0007) |
+| `GROQ_API_KEY` | a separate production Groq key |
+| `GITHUB_TOKEN` | fine-grained token scoped to `agent-sandbox-repo` |
+
+Keep each person's key private; the user name before `:` is what the audit log records.
+
 ## Coming in later phases
 
 | Phase | Setup needed |
 |---|---|
-| 2 | Production Groq key + GitHub token as Northflank secrets |
 | 4 | GitHub App instead of the personal token |
 | 6 | Langfuse project keys, optional Cerebras / Anthropic keys |

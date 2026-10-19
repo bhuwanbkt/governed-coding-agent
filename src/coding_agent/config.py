@@ -48,10 +48,25 @@ class Settings(BaseSettings):
     allowed_test_commands: str = "pytest,python -m pytest"
     agent_max_fix_attempts: int = 2  # retries after the first attempt fails its tests
     agent_max_llm_turns: int = 25  # per attempt; each turn may contain several tool calls
+    llm_min_interval_seconds: float = 1.0  # pacing between LLM calls (free tiers rate-limit)
+    keep_workspaces: bool = False  # keep job folders after a job for debugging
     git_author_name: str = "governed-coding-agent"
     git_author_email: str = "agent@users.noreply.github.com"
 
-    @field_validator("database_url", "groq_api_key", "github_token", mode="before")
+    # --- API & governance ------------------------------------------------------------
+    # "alice:<key>,bob:<key>": each key maps to a user, so approvals have a real identity.
+    api_keys: SecretStr | None = None
+    # Comma-separated URL prefixes the agent may work on, e.g. "https://github.com/bhuwanbkt/".
+    allowed_repo_prefixes: str = ""
+
+    # --- worker ----------------------------------------------------------------------
+    run_worker_in_api: bool = False  # free tier: one service runs both API and worker
+    worker_poll_seconds: float = 3.0
+    worker_heartbeat_seconds: float = 15.0
+    worker_stale_after_seconds: int = 300
+    worker_max_claims: int = 3  # a job interrupted this many times is marked failed
+
+    @field_validator("database_url", "groq_api_key", "github_token", "api_keys", mode="before")
     @classmethod
     def _blank_is_none(cls, value: object) -> object:
         if isinstance(value, str):
@@ -68,9 +83,34 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _production_requirements(self) -> Settings:
-        if self.app_env == "production" and self.database_url is None:
-            raise ValueError("DATABASE_URL is required when APP_ENV=production")
+        if self.app_env == "production":
+            if self.database_url is None:
+                raise ValueError("DATABASE_URL is required when APP_ENV=production")
+            if not self.repo_prefixes():
+                raise ValueError("ALLOWED_REPO_PREFIXES is required when APP_ENV=production")
+        self.api_users()  # fail fast on a malformed API_KEYS value
         return self
+
+    def api_users(self) -> dict[str, str]:
+        """Map API key -> user name, parsed from API_KEYS ("user:key,user:key")."""
+        if self.api_keys is None:
+            return {}
+        users: dict[str, str] = {}
+        for entry in self.api_keys.get_secret_value().split(","):
+            if not entry.strip():
+                continue
+            user, sep, key = entry.strip().partition(":")
+            if not sep or not user or len(key) < 16:
+                raise ValueError("API_KEYS entries must look like user:key with keys of 16+ characters")
+            users[key] = user
+        return users
+
+    def repo_prefixes(self) -> tuple[str, ...]:
+        return tuple(p.strip() for p in self.allowed_repo_prefixes.split(",") if p.strip())
+
+    def repo_allowed(self, repo_url: str) -> bool:
+        prefixes = self.repo_prefixes()
+        return not prefixes or repo_url.startswith(prefixes)
 
 
 @lru_cache

@@ -1,20 +1,22 @@
-"""Phase 1 workflow (single coding agent) as a LangGraph state machine.
+"""Coding workflow (single coding agent) as a LangGraph state machine.
 
-    prepare -> code -> test --pass--> approve --yes--> publish -> END
-                 ^       |               |
-                 |       +--fail, attempts left
-                 +-------+               +--no--> END (rejected)
-                         +--fail, no attempts left--> hand_off -> END
+    prepare -> code -> test --pass--> package --> END (awaiting_approval | no_changes)
+                 ^       |
+                 +-------+ fail, attempts left
+                         +-- fail, no attempts left --> hand_off --> END
 
-Control flow is deterministic code; the LLM is used only inside `code`. Tests always run
-as a separate step the model can't skip, and nothing is pushed without human approval.
+The run stops at a human approval point. `package` stores the exact patch and its SHA-256;
+publishing (publish.py) happens later, only for an approved job, by re-applying that patch.
+Control flow is deterministic code; the LLM is used only inside `code`.
 """
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
 import re
-from collections.abc import Awaitable, Callable
+import time
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
 
@@ -31,11 +33,10 @@ logger = logging.getLogger(__name__)
 CODER_TOOLS = frozenset({"list_files", "read_file", "search_code", "write_file", "replace_in_file"})
 SETUP_TOOLS = frozenset({"git_clone", "list_files"})
 TESTER_TOOLS = frozenset({"run_tests"})
-REVIEWER_TOOLS = frozenset({"git_diff"})
-PUBLISHER_TOOLS = frozenset({"git_commit_and_push", "open_pull_request"})
+PACKAGER_TOOLS = frozenset({"git_diff", "export_patch"})
+PUBLISHER_TOOLS = frozenset({"git_clone", "apply_patch", "git_commit_and_push", "open_pull_request"})
 
-JobStatus = Literal["running", "no_changes", "rejected", "succeeded", "handed_off", "failed"]
-Approver = Callable[["ApprovalRequest"], Awaitable[bool]]
+JobStatus = Literal["running", "awaiting_approval", "no_changes", "handed_off", "failed"]
 
 
 class AgentState(TypedDict, total=False):
@@ -51,6 +52,8 @@ class AgentState(TypedDict, total=False):
     test_exit_code: int
     test_output: str
     diff: str
+    patch: str
+    diff_sha256: str
     status: JobStatus
     pr_url: str | None
     error: str | None
@@ -58,18 +61,10 @@ class AgentState(TypedDict, total=False):
 
 
 @dataclass(frozen=True)
-class ApprovalRequest:
-    job_id: str
-    task: str
-    diff: str
-    coder_summary: str
-    test_output: str
-
-
-@dataclass(frozen=True)
 class AgentLimits:
     max_attempts: int = 3  # first attempt + fixes
     max_llm_turns: int = 25  # per attempt
+    min_llm_interval_seconds: float = 0.0  # pacing for rate-limited providers
 
 
 @dataclass
@@ -77,7 +72,6 @@ class AgentDeps:
     toolbox: Toolbox
     model: ToolCallingModel
     prompts: PromptRegistry
-    approver: Approver
     limits: AgentLimits
     provider: str | None = None
 
@@ -90,12 +84,21 @@ def _exit_code(output: str) -> int:
     return int(match.group(1)) if match else 1
 
 
-def _tail(text: str, lines: int = 60) -> str:
+def tail(text: str, lines: int = 60) -> str:
     return "\n".join(text.splitlines()[-lines:])
 
 
 def build_graph(deps: AgentDeps) -> Any:
     toolbox, limits = deps.toolbox, deps.limits
+    last_llm_call = 0.0
+
+    async def paced_llm_call(messages: list[BaseMessage]) -> BaseMessage:
+        nonlocal last_llm_call
+        wait = limits.min_llm_interval_seconds - (time.monotonic() - last_llm_call)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        last_llm_call = time.monotonic()
+        return await deps.model.ainvoke(messages)
 
     async def prepare(state: AgentState) -> dict[str, Any]:
         cloned = await toolbox.call(
@@ -124,7 +127,7 @@ def build_graph(deps: AgentDeps) -> Any:
                 "task": state["task"],
                 "test_command": state["test_command"],
                 "repo_files": state["repo_files"],
-                "test_output": _tail(state.get("test_output", "")) if attempt > 1 else "",
+                "test_output": tail(state.get("test_output", "")) if attempt > 1 else "",
                 "attempt": attempt,
                 "max_attempts": limits.max_attempts,
             },
@@ -137,7 +140,7 @@ def build_graph(deps: AgentDeps) -> Any:
         ]
         summary = "Stopped: LLM turn budget exhausted before the coder finished."
         for _ in range(limits.max_llm_turns):
-            response = await deps.model.ainvoke(messages)
+            response = await paced_llm_call(messages)
             messages.append(response)
             tool_calls = response.tool_calls if isinstance(response, AIMessage) else []
             if not tool_calls:
@@ -163,53 +166,25 @@ def build_graph(deps: AgentDeps) -> Any:
         )
         return {"test_exit_code": _exit_code(output), "test_output": output}
 
-    def after_test(state: AgentState) -> Literal["approve", "code", "hand_off"]:
+    def after_test(state: AgentState) -> Literal["package", "code", "hand_off"]:
         if state["test_exit_code"] == 0:
-            return "approve"
+            return "package"
         return "code" if state["attempt"] < limits.max_attempts else "hand_off"
 
-    async def approve(state: AgentState) -> dict[str, Any]:
-        diff = await toolbox.call("git_diff", {}, actor="reviewer", allowed=REVIEWER_TOOLS)
+    async def package(state: AgentState) -> dict[str, Any]:
+        """Freeze the result for review: a readable diff plus the exact patch and its hash."""
+        diff = await toolbox.call("git_diff", {}, actor="packager", allowed=PACKAGER_TOOLS)
         if diff.strip() == "(no changes)":
-            return {"diff": diff, "status": "no_changes"}
-        approved = await deps.approver(
-            ApprovalRequest(
-                job_id=state["job_id"],
-                task=state["task"],
-                diff=diff,
-                coder_summary=state.get("coder_summary", ""),
-                test_output=_tail(state.get("test_output", ""), 20),
-            )
-        )
-        return {"diff": diff, "status": "running" if approved else "rejected"}
-
-    def after_approve(state: AgentState) -> Literal["publish", "end"]:
-        return "publish" if state["status"] == "running" else "end"
-
-    async def publish(state: AgentState) -> dict[str, Any]:
-        pushed = await toolbox.call(
-            "git_commit_and_push",
-            {"message": f"feat(agent): {state['task'][:60]}\n\nJob: {state['job_id']}"},
-            actor="publisher",
-            allowed=PUBLISHER_TOOLS,
-        )
-        body = (
-            f"## Task\n\n{state['task']}\n\n"
-            f"## Agent summary\n\n{state.get('coder_summary', '')}\n\n"
-            f"## Tests\n\n```\n{_tail(state.get('test_output', ''), 15)}\n```\n\n"
-            f"---\nJob `{state['job_id']}` · attempts: {state['attempt']} · "
-            f"prompts: {', '.join(state.get('prompt_refs', []))} · approved by a human before push"
-        )
-        pr = await toolbox.call(
-            "open_pull_request",
-            {"title": f"[agent] {state['task'][:70]}", "body": body, "base_branch": state["base_branch"]},
-            actor="publisher",
-            allowed=PUBLISHER_TOOLS,
-        )
-        pr_url = pr.removeprefix("PR_URL=") if pr.startswith("PR_URL=") else None
-        if pushed.startswith("ERROR") or pr.startswith("ERROR"):
-            return {"status": "failed", "error": f"{pushed}\n{pr}", "pr_url": pr_url}
-        return {"status": "succeeded", "pr_url": pr_url}
+            return {"diff": "", "status": "no_changes"}
+        patch = await toolbox.call("export_patch", {}, actor="packager", allowed=PACKAGER_TOOLS)
+        if patch.startswith("ERROR"):
+            return {"status": "failed", "error": patch}
+        return {
+            "diff": diff,
+            "patch": patch,
+            "diff_sha256": hashlib.sha256(patch.encode()).hexdigest(),
+            "status": "awaiting_approval",
+        }
 
     async def hand_off(state: AgentState) -> dict[str, Any]:
         return {
@@ -221,27 +196,17 @@ def build_graph(deps: AgentDeps) -> Any:
     graph.add_node("prepare", prepare)
     graph.add_node("code", code)
     graph.add_node("test", test)
-    graph.add_node("approve", approve)
-    graph.add_node("publish", publish)
+    graph.add_node("package", package)
     graph.add_node("hand_off", hand_off)
     graph.add_edge(START, "prepare")
     graph.add_conditional_edges("prepare", after_prepare, {"code": "code", "end": END})
     graph.add_edge("code", "test")
     graph.add_conditional_edges(
-        "test", after_test, {"approve": "approve", "code": "code", "hand_off": "hand_off"}
+        "test", after_test, {"package": "package", "code": "code", "hand_off": "hand_off"}
     )
-    graph.add_conditional_edges("approve", after_approve, {"publish": "publish", "end": END})
-    graph.add_edge("publish", END)
+    graph.add_edge("package", END)
     graph.add_edge("hand_off", END)
     return graph.compile()
 
 
-__all__ = [
-    "AgentDeps",
-    "AgentLimits",
-    "AgentState",
-    "ApprovalRequest",
-    "Approver",
-    "LoopDetectedError",
-    "build_graph",
-]
+__all__ = ["AgentDeps", "AgentLimits", "AgentState", "LoopDetectedError", "build_graph", "tail"]

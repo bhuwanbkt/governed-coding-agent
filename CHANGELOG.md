@@ -6,6 +6,21 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Phase 2: job API (`POST /jobs`, `GET /jobs`, `GET /jobs/{id}`, `POST /jobs/{id}/decision`,
+  `GET /jobs/{id}/audit`) with per-user API keys and a repository allowlist.
+- Postgres job queue worker (`coding-agent worker`, or embedded in the API) with heartbeats,
+  stale-job recovery and graceful shutdown.
+- Approval bound to the exact patch (SHA-256); publishing re-applies the approved patch to a
+  fresh clone (ADR 0006). Separation of duties enforced in the API and the database.
+- Every tool call, state change and decision persisted to the append-only `audit_log`.
+- Migration 0002: job results, stored patch, `no_changes` status.
+
+### Changed
+- The coding run now stops at `awaiting_approval`; publishing is a separate run.
+- LLM calls are paced (`LLM_MIN_INTERVAL_SECONDS`); job workspaces are cleaned up after use.
+- `replace_in_file` rejects an empty `old` with guidance.
+
+### Added (phases 0–1)
 - Phase 1 core loop: single coding agent as a LangGraph workflow
   (clone -> code -> test -> fix -> human approval -> push + PR).
 - Workspace MCP server: sandboxed file, search, test and git tools (path checks, test-command
