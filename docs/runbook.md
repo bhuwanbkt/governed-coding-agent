@@ -33,6 +33,23 @@ Northflank set the service image to `ghcr.io/<owner>/governed-coding-agent:<good
   **pooled** host (`-pooler`) and `sslmode=require`.
 - `database: not_configured` — `DATABASE_URL` secret missing on the Northflank service.
 
+## Job stuck or failed
+
+Check `GET /jobs/{id}` (status, `error`, `attempts`) and `GET /jobs/{id}/audit` (last tool call).
+
+- **`running` for a long time:** if the worker died, its heartbeat stops and the job is
+  requeued automatically after `WORKER_STALE_AFTER_SECONDS` (default 300 s). After
+  `WORKER_MAX_CLAIMS` claims it is marked `failed`.
+- **`publishing` then `failed` ("interrupted"):** check the sandbox repo for a pushed
+  `agent/<id>` branch or open PR before resubmitting; publishing is never retried automatically.
+- **`failed` with a `git apply` error (patch failed):** the base branch moved after review. Resubmit the
+  task; the new diff needs a new approval.
+- **Groq 429 / rate limit:** retried with backoff; raise `LLM_MIN_INTERVAL_SECONDS` if frequent.
+- **`403 repository is not on the allowlist`:** add the prefix to `ALLOWED_REPO_PREFIXES`.
+- **API returns 503 "API keys are not configured":** set `API_KEYS` on the service.
+
+Never edit `audit_log`; it is append-only by design (triggers reject UPDATE/DELETE).
+
 ## Rotating secrets
 
 | Secret | Where to rotate | Then update |
@@ -40,5 +57,8 @@ Northflank set the service image to `ghcr.io/<owner>/governed-coding-agent:<good
 | Neon password | Neon → Roles → reset | Northflank `DATABASE_URL`, GitHub `NEON_MIGRATION_DATABASE_URL` |
 | Northflank API token | Northflank → Team → API tokens | GitHub secret `NORTHFLANK_API_KEY` |
 | GHCR pull token | GitHub → Developer settings → tokens | Northflank registry credentials |
+| Groq key | console.groq.com → API Keys | Northflank `GROQ_API_KEY` |
+| Agent GitHub token | GitHub → Developer settings → Fine-grained tokens | Northflank `GITHUB_TOKEN` |
+| A user's API key | generate a new key | Northflank `API_KEYS` (replace that user's entry) |
 
 Redeploy after rotating runtime secrets.

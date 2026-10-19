@@ -141,3 +141,28 @@ def test_tools_refuse_to_run_before_a_successful_clone(
         with pytest.raises(ws.ToolError, match="not cloned"):
             call()
     assert not (parent / "workspaces" / "job1" / "repo" / "calculator.py").exists()
+
+
+@pytest.mark.usefixtures("repo")
+def test_empty_old_is_rejected_with_guidance() -> None:
+    with pytest.raises(ws.ToolError, match="must not be empty"):
+        ws.replace_in_file("calculator.py", "", "x")
+
+
+def test_export_and_apply_patch_roundtrip(
+    repo: Path, sample_remote: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+
+    ws.write_file("calculator.py", ws.read_file("calculator.py") + "\nPI = 3.14\n")
+    ws.write_file("docs/new.md", "hello\n")
+    patch = ws.export_patch()
+    sha = hashlib.sha256(patch.encode()).hexdigest()
+
+    monkeypatch.setenv("WORKSPACE_DIR", str(tmp_path / "publish"))
+    ws.git_clone(sample_remote, base_branch="main", work_branch="agent/pub")
+    with pytest.raises(ws.ToolError, match="does not match"):
+        ws.apply_patch(patch + "x", sha)
+    assert ws.apply_patch(patch, sha).startswith("Applied approved patch")
+    assert "PI = 3.14" in ws.read_file("calculator.py")
+    assert ws.read_file("docs/new.md") == "hello\n"

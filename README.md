@@ -83,6 +83,33 @@ The agent clones the repo into `workspaces/<job-id>/`, edits code, runs the test
 the failure output if they fail), then **stops and shows you the diff**. Nothing is pushed unless
 you type `yes`. Then it pushes `agent/<job-id>` and opens a pull request.
 
+### Use the job API (phase 2)
+
+Set `API_KEYS=alice:<16+ char key>,bob:<16+ char key>` and `RUN_WORKER_IN_API=true` in `.env`
+(or run `uv run coding-agent worker` in a second terminal), then:
+
+```bash
+API=http://localhost:8080
+# alice submits a job (202, status "queued")
+curl -s -X POST $API/jobs -H "X-API-Key: $ALICE_KEY" -H "Content-Type: application/json" \
+  -d '{"repo_url": "https://github.com/<you>/agent-sandbox-repo.git",
+       "task": "Add a divide(a, b) function that raises ValueError on zero, with tests"}'
+
+# poll until status is "awaiting_approval"; the response holds the diff and diff_sha256
+curl -s $API/jobs/$JOB_ID -H "X-API-Key: $ALICE_KEY"
+
+# bob (not alice: separation of duties) approves that exact diff
+curl -s -X POST $API/jobs/$JOB_ID/decision -H "X-API-Key: $BOB_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"decision": "approve", "diff_sha256": "<sha from the job>", "comment": "LGTM"}'
+
+# the worker publishes; status becomes "succeeded" with pr_url. Full trail:
+curl -s $API/jobs/$JOB_ID/audit -H "X-API-Key: $BOB_KEY"
+```
+
+Job states: `queued → running → awaiting_approval → approved → publishing → succeeded`
+(or `no_changes`, `rejected`, `failed`).
+
 ### Tests
 
 ```bash
@@ -121,8 +148,9 @@ src/coding_agent/
   agent/          LangGraph workflow, governed MCP Toolbox, LLM factory, job runner
   mcp_servers/    workspace MCP server (sandboxed files, tests, git)
   prompts/        versioned prompt templates + registry
-  api/            FastAPI app, middleware (UI arrives in phase 5)
-  db/             engine and data access
+  api/            FastAPI app: job routes, API-key auth, middleware (UI in phase 5)
+  worker/         Postgres queue worker: claim, heartbeat, recover, code, publish
+  db/             engine, job queue and audit data access
   observability/  structured logging (tracing/metrics/masking later)
   cli.py          `coding-agent` command
   config.py       typed settings from env vars
@@ -136,7 +164,7 @@ docs/             architecture, ADRs, runbook, setup
 
 - [x] **0 Foundation** — repo hygiene, CI/CD to Northflank, schema, health checks
 - [x] **1 Core loop** — MCP workspace server, single agent, prompt registry, push + PR
-- [ ] **2 API + worker** — Postgres job queue, audit logging, restart recovery
+- [x] **2 API + worker** — Postgres job queue, audit logging, restart recovery
 - [ ] **3 Multi-agent + retrieval** — supervisor + 5 agents, LlamaIndex
 - [ ] **4 Governance** — permissions, guards, approvals, budgets, masking
 - [ ] **5 UI + login** — GitHub OAuth, job timeline, approval screen

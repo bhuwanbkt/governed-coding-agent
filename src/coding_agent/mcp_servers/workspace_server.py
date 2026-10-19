@@ -15,6 +15,7 @@ Run standalone for debugging:
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import re
 import shlex
@@ -31,6 +32,7 @@ server = MCPServer("workspace")
 
 MAX_READ_CHARS = 60_000
 MAX_OUTPUT_CHARS = 12_000
+MAX_PATCH_CHARS = 1_000_000
 SKIP_DIRS = {
     ".git",
     "node_modules",
@@ -140,6 +142,22 @@ def _git(*args: str, cwd: Path | None = None, remote_url: str | None = None, tim
     return out
 
 
+def _git_raw(*args: str) -> str:
+    """Like _git but returns stdout byte-for-byte (patches must not be stripped or redacted)."""
+    proc = subprocess.run(  # noqa: S603 - fixed binary, no shell
+        ["git", *args],  # noqa: S607
+        cwd=_require_repo(),
+        env=_git_env(None),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise ToolError(f"git {args[0]} failed: {_redact(proc.stderr.strip())}")
+    return proc.stdout
+
+
 def _origin_url() -> str:
     return _git("remote", "get-url", "origin")
 
@@ -205,6 +223,8 @@ def write_file(path: str, content: str) -> str:
 @server.tool()
 def replace_in_file(path: str, old: str, new: str) -> str:
     """Replace exactly one occurrence of `old` with `new`. Prefer this for small edits."""
+    if not old:
+        raise ToolError("`old` must not be empty; to add new content, read the file and use write_file")
     p = _safe_path(path)
     if not p.is_file():
         raise ToolError(f"{path} does not exist")
@@ -282,6 +302,34 @@ def git_diff() -> str:
     if not diff:
         return "(no changes)"
     return _truncate(f"{_git('diff', '--cached', '--stat')}\n\n{diff}")
+
+
+@server.tool()
+def export_patch() -> str:
+    """Return every change on the working branch as one exact, applyable patch (no truncation)."""
+    _git("add", "-A")
+    patch = _git_raw("diff", "--cached", "--binary")
+    if len(patch) > MAX_PATCH_CHARS:
+        raise ToolError(f"patch is {len(patch)} chars; the limit is {MAX_PATCH_CHARS}")
+    return patch
+
+
+@server.tool()
+def apply_patch(patch: str, expected_sha256: str) -> str:
+    """Apply an approved patch to the clean working branch, refusing anything but the reviewed bytes."""
+    actual = hashlib.sha256(patch.encode()).hexdigest()
+    if actual != expected_sha256:
+        raise ToolError("patch does not match the approved SHA-256; refusing to apply")
+    repo = _require_repo()
+    if _git("status", "--porcelain"):
+        raise ToolError("working tree is not clean")
+    patch_file = _workspace() / "approved.patch"
+    patch_file.write_text(patch, encoding="utf-8")
+    try:
+        _git("apply", "--index", "--whitespace=nowarn", str(patch_file), cwd=repo)
+    finally:
+        patch_file.unlink(missing_ok=True)
+    return f"Applied approved patch {actual[:12]}"
 
 
 @server.tool()

@@ -13,7 +13,7 @@ import logging
 import sys
 import time
 from collections import Counter
-from collections.abc import AsyncIterator, Collection, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +25,7 @@ from mcp.client.stdio import stdio_client
 logger = logging.getLogger("coding_agent.audit")
 
 MAX_IDENTICAL_CALLS = 3
+AuditSink = Callable[[dict[str, Any]], Awaitable[None]]
 _SECRET_ARG_NAMES = {"token", "password", "secret", "api_key"}
 
 
@@ -55,12 +56,18 @@ class Toolbox:
     session: ClientSession
     specs: dict[str, ToolSpec]
     job_id: str = "local"
+    audit_sink: AuditSink | None = None  # e.g. writes to the audit_log table (phase 2)
     _call_counts: Counter[str] = field(default_factory=Counter)
 
     @classmethod
     @asynccontextmanager
     async def connect(
-        cls, workspace_dir: Path, *, job_id: str, env: Mapping[str, str] | None = None
+        cls,
+        workspace_dir: Path,
+        *,
+        job_id: str,
+        env: Mapping[str, str] | None = None,
+        audit_sink: AuditSink | None = None,
     ) -> AsyncIterator[Toolbox]:
         """Start the workspace MCP server as a subprocess and open a session to it."""
         params = StdioServerParameters(
@@ -75,7 +82,7 @@ class Toolbox:
                 t.name: ToolSpec(t.name, t.description or "", dict(t.input_schema or {}))
                 for t in listed.tools
             }
-            yield cls(session=session, specs=specs, job_id=job_id)
+            yield cls(session=session, specs=specs, job_id=job_id, audit_sink=audit_sink)
 
     def schemas(self, allowed: Collection[str]) -> list[dict[str, Any]]:
         return [self.specs[name].to_openai() for name in allowed if name in self.specs]
@@ -84,38 +91,41 @@ class Toolbox:
         """Call a tool on behalf of `actor`. Returns text; tool errors come back as 'ERROR: ...'."""
         start = time.perf_counter()
         if name not in allowed or name not in self.specs:
-            self._audit(actor, name, args, allowed=False, result="blocked: not in allowlist", start=start)
+            await self._audit(
+                actor, name, args, allowed=False, result="blocked: not in allowlist", start=start
+            )
             raise ToolNotAllowedError(f"{actor} is not allowed to call {name!r}")
 
         fingerprint = f"{actor}:{name}:{json.dumps(args, sort_keys=True, default=str)}"
         self._call_counts[fingerprint] += 1
         if self._call_counts[fingerprint] > MAX_IDENTICAL_CALLS:
-            self._audit(actor, name, args, allowed=False, result="blocked: loop detected", start=start)
+            await self._audit(actor, name, args, allowed=False, result="blocked: loop detected", start=start)
             raise LoopDetectedError(f"{actor} repeated {name} with identical arguments too many times")
 
         result = await self.session.call_tool(name, dict(args))
         text = "\n".join(getattr(part, "text", "") for part in getattr(result, "content", []) or [])
         if getattr(result, "is_error", False):
             text = f"ERROR: {text}"
-        self._audit(actor, name, args, allowed=True, result=text, start=start)
+        await self._audit(actor, name, args, allowed=True, result=text, start=start)
         return text
 
-    def _audit(
+    async def _audit(
         self, actor: str, tool: str, args: Mapping[str, Any], *, allowed: bool, result: str, start: float
     ) -> None:
-        logger.info(
-            "tool_call",
-            extra={
-                "event_type": "tool_call" if allowed else "policy_block",
-                "job_id": self.job_id,
-                "actor": actor,
-                "tool": tool,
-                "allowed": allowed,
-                "args_masked": _mask_args(args),
-                "result_summary": result[:300],
-                "duration_ms": round((time.perf_counter() - start) * 1000, 1),
-            },
-        )
+        event = {
+            "event_type": "tool_call" if allowed else "policy_block",
+            "job_id": self.job_id,
+            "actor": actor,
+            "tool": tool,
+            "allowed": allowed,
+            "args_masked": _mask_args(args),
+            "result_summary": result[:300],
+            "duration_ms": round((time.perf_counter() - start) * 1000, 1),
+        }
+        logger.info("tool_call", extra=event)
+        if self.audit_sink is not None:
+            # Fail closed: if the audit row can't be written, the job stops rather than act unrecorded.
+            await self.audit_sink(event)
 
 
 def _mask_args(args: Mapping[str, Any]) -> dict[str, Any]:
