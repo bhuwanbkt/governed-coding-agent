@@ -6,7 +6,6 @@ deleted from audit_log by design.
 
 from __future__ import annotations
 
-import os
 import uuid
 from pathlib import Path
 
@@ -18,17 +17,14 @@ from sqlalchemy.exc import DBAPIError
 
 from coding_agent.db.session import get_engine
 
-pytestmark = [
-    pytest.mark.integration,
-    pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="TEST_DATABASE_URL not set"),
-]
+pytestmark = pytest.mark.integration
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
-def migrated_db(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DATABASE_URL", os.environ["TEST_DATABASE_URL"])
+def migrated_db(monkeypatch: pytest.MonkeyPatch, database_url: str) -> None:
+    monkeypatch.setenv("DATABASE_URL", database_url)
     command.upgrade(Config(str(ROOT / "alembic.ini")), "head")
 
 

@@ -15,6 +15,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppEnv = Literal["local", "test", "production"]
 LLMProvider = Literal["groq", "fake"]
+SupervisorMode = Literal["deterministic", "llm"]
 
 
 def normalize_database_url(url: str) -> str:
@@ -50,6 +51,18 @@ class Settings(BaseSettings):
     agent_max_llm_turns: int = 25  # per attempt; each turn may contain several tool calls
     llm_min_interval_seconds: float = 1.0  # pacing between LLM calls (free tiers rate-limit)
     keep_workspaces: bool = False  # keep job folders after a job for debugging
+    agent_max_llm_calls: int = 40  # whole job, all agents; hitting it hands the job to a human
+    agent_max_review_rounds: int = 1  # extra coder rounds the reviewer agent may request
+    agent_max_replans: int = 1  # times the planner may be asked to re-plan after failing tests
+    # deterministic: graph code routes between agents (default, production)
+    # llm: a supervisor LLM proposes the next step; a policy table and hard rules validate it
+    supervisor_mode: SupervisorMode = "deterministic"
+
+    # --- retrieval (LlamaIndex) ----------------------------------------------------------
+    retrieval_embeddings: bool = False  # hybrid BM25 + embeddings; off = BM25 only (less memory)
+    embedding_model: str = "BAAI/bge-small-en-v1.5"  # runs locally via fastembed, no API key
+    embedding_cache_dir: Path | None = None  # where the embedding model is downloaded/cached
+    retrieval_top_k: int = 6
     git_author_name: str = "governed-coding-agent"
     git_author_email: str = "agent@users.noreply.github.com"
 

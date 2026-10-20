@@ -20,7 +20,7 @@ import socket
 from collections.abc import Callable
 from typing import Any
 
-from coding_agent.agent.llm import ToolCallingModel
+from coding_agent.agent.llm import ModelProvider
 from coding_agent.agent.publish import PublishRequest
 from coding_agent.agent.runner import JobRequest, run_coding_job, run_publish_job
 from coding_agent.config import Settings
@@ -29,7 +29,7 @@ from coding_agent.observability.logging import job_id_var
 
 logger = logging.getLogger(__name__)
 
-ModelFactory = Callable[[], ToolCallingModel | None]
+ModelFactory = Callable[[], ModelProvider | None]
 
 
 class Worker:
@@ -95,7 +95,7 @@ class Worker:
             ),
             self.settings,
             job_id=str(job.id),
-            model=self._model_factory(),
+            models=self._model_factory(),
             audit_sink=self._audit_sink,
         )
         status = state.get("status", "failed")
@@ -111,6 +111,10 @@ class Worker:
             patch=state.get("patch"),
             diff_sha256=state.get("diff_sha256"),
             prompt_refs=state.get("prompt_refs", []),
+            plan=state.get("plan"),
+            review=state.get("review"),
+            routes=state.get("routes", []),
+            llm_calls=state.get("llm_calls", 0),
             error=state.get("error"),
         )
 
@@ -151,6 +155,8 @@ class Worker:
                 coder_summary=job.coder_summary or "",
                 test_output=job.test_output or "",
                 prompt_refs=job.prompt_refs,
+                plan=job.plan,
+                review=job.review,
             ),
             self.settings,
             audit_sink=self._audit_sink,

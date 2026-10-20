@@ -1,7 +1,8 @@
-"""End to end: real MCP server subprocess, real Git, real pytest runs, scripted LLM.
+"""End to end: real MCP server subprocesses (workspace + code index), real Git, real pytest runs,
+real LlamaIndex retrieval, scripted LLMs per agent role.
 
-No network, no API key and no database: the LLM is `ScriptedChatModel`, the remote is a local
-bare repo. The database-backed worker/API flow is covered in tests/integration.
+No network, no API key and no database: the remote is a local bare repo. The database-backed
+worker/API flow is covered in tests/integration.
 """
 
 from __future__ import annotations
@@ -13,24 +14,34 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
-from coding_agent.agent.fake_llm import ScriptedChatModel, demo_model, tool_call
+from coding_agent.agent.fake_llm import (
+    ScriptedChatModel,
+    ScriptedModels,
+    demo_coder,
+    demo_models,
+    submit_review,
+    tool_call,
+)
 from coding_agent.agent.publish import PublishRequest, PublishResult
+from coding_agent.agent.roles import READ_TOOLS
 from coding_agent.agent.runner import JobRequest, run_coding_job, run_publish_job
 from coding_agent.config import Settings
 
 TASK = "Add a divide(a, b) function that raises ValueError on zero, with tests"
 JOB_ID = "00000000-0000-4000-8000-0000000000e2"
+BROKEN_TEST = "def test_broken() -> None:\n    assert 1 == 2\n"
 
 
-def make_settings(tmp_path: Path) -> Settings:
-    return Settings(  # type: ignore[call-arg]
-        _env_file=None,
-        app_env="test",
-        llm_provider="fake",
-        workspaces_dir=tmp_path / "workspaces",
-        allowed_test_commands="python -m pytest",
-        agent_max_fix_attempts=1,
-    )
+def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
+    values: dict[str, Any] = {
+        "app_env": "test",
+        "llm_provider": "fake",
+        "workspaces_dir": tmp_path / "workspaces",
+        "allowed_test_commands": "python -m pytest",
+        "agent_max_fix_attempts": 1,
+        **overrides,
+    }
+    return Settings(_env_file=None, **values)  # type: ignore[call-arg]
 
 
 def remote_branches(remote_uri: str) -> str:
@@ -43,13 +54,24 @@ def remote_branches(remote_uri: str) -> str:
     ).stdout
 
 
-def code(tmp_path: Path, remote: str, model: ScriptedChatModel) -> dict[str, Any]:
+def run(
+    tmp_path: Path,
+    remote: str,
+    models: ScriptedModels,
+    events: list[dict[str, Any]] | None = None,
+    **settings: Any,
+) -> dict[str, Any]:
+    async def sink(event: dict[str, Any]) -> None:
+        if events is not None:
+            events.append(event)
+
     state = asyncio.run(
         run_coding_job(
             JobRequest(repo_url=remote, task=TASK, test_command="python -m pytest -q"),
-            make_settings(tmp_path),
+            make_settings(tmp_path, **settings),
             job_id=JOB_ID,
-            model=model,
+            models=models,
+            audit_sink=sink,
         )
     )
     return dict(state)
@@ -67,28 +89,68 @@ def publish_state(tmp_path: Path, state: dict[str, Any], *, patch: str | None = 
                 patch=state["patch"] if patch is None else patch,
                 approved_sha256=state["diff_sha256"],
                 approved_by="reviewer",
+                plan=state.get("plan"),
+                review=state.get("review"),
             ),
             make_settings(tmp_path),
         )
     )
 
 
-def test_coding_stops_for_approval_with_exact_patch(tmp_path: Path, sample_remote: str) -> None:
-    state = code(tmp_path, sample_remote, demo_model())
+def broken_coder() -> ScriptedChatModel:
+    return ScriptedChatModel(
+        [
+            tool_call("write_file", {"path": "tests/test_broken.py", "content": BROKEN_TEST}, "a1"),
+            AIMessage(content="Added a test."),
+            AIMessage(content="I could not fix it."),
+        ]
+    )
+
+
+# --------------------------------------------------------------------------- happy path
+def test_plan_code_test_review_then_stop_for_approval(tmp_path: Path, sample_remote: str) -> None:
+    events: list[dict[str, Any]] = []
+    state = run(tmp_path, sample_remote, demo_models(), events)
 
     assert state["status"] == "awaiting_approval", state.get("error")
-    assert state["attempt"] == 1
+    assert state["plan"]["files_to_change"][0]["path"] == "calculator.py"
+    assert state["review"]["verdict"] == "approve"
+    assert state["round"] == 1
     assert "def divide" in state["diff"]
     assert state["patch"].startswith("diff --git")
     assert len(state["diff_sha256"]) == 64
     assert "5 passed" in state["test_output"]
-    assert str(state["prompt_refs"][0]).startswith("coder@v1#")
+    assert [r.split("#")[0] for r in state["prompt_refs"]] == ["planner@v1", "coder@v2", "reviewer@v1"]
+    assert [(r["point"], r["choice"]) for r in state["routes"]] == [
+        ("after_test", "review"),
+        ("after_review", "package"),
+    ]
+    assert state["llm_calls"] == 7  # planner 2, coder 4, reviewer 1
+    assert state["index_summary"].startswith("INDEXED")
     assert state["work_branch"] not in remote_branches(sample_remote)  # nothing pushed yet
     assert not (tmp_path / "workspaces" / f"{JOB_ID}-code").exists()  # workspace cleaned up
 
+    tools = [e["tool"] for e in events if e["event_type"] == "tool_call"]
+    assert tools[:3] == ["git_clone", "list_files", "build_index"]
+    assert {"search_codebase", "replace_in_file", "run_tests", "git_diff", "export_patch"} <= set(tools)
+    planner_search = next(e for e in events if e.get("tool") == "search_codebase")
+    assert planner_search["actor"] == "planner"
+    assert planner_search["result_summary"].startswith("1. ")  # real hits; ranking is in test_retrieval
+    assert all(e["job_id"] == JOB_ID for e in events)
+
+
+def test_each_agent_sees_only_its_own_tools(tmp_path: Path, sample_remote: str) -> None:
+    models = demo_models()
+    run(tmp_path, sample_remote, models)
+
+    assert models.tools_seen["planner"] == sorted({*READ_TOOLS, "submit_plan"})
+    assert models.tools_seen["reviewer"] == sorted({*READ_TOOLS, "git_diff", "submit_review"})
+    assert "write_file" in models.tools_seen["coder"]
+    assert not {"git_commit_and_push", "run_tests", "export_patch"} & set(models.tools_seen["coder"])
+
 
 def test_approved_patch_is_published_from_a_fresh_clone(tmp_path: Path, sample_remote: str) -> None:
-    state = code(tmp_path, sample_remote, demo_model())
+    state = run(tmp_path, sample_remote, demo_models())
     result = publish_state(tmp_path, state)
 
     assert result.status == "succeeded", result.error
@@ -105,7 +167,7 @@ def test_approved_patch_is_published_from_a_fresh_clone(tmp_path: Path, sample_r
 
 
 def test_tampered_patch_is_refused(tmp_path: Path, sample_remote: str) -> None:
-    state = code(tmp_path, sample_remote, demo_model())
+    state = run(tmp_path, sample_remote, demo_models())
     tampered = state["patch"].replace("cannot divide by zero", "anything goes")
     result = publish_state(tmp_path, state, patch=tampered)
 
@@ -114,71 +176,171 @@ def test_tampered_patch_is_refused(tmp_path: Path, sample_remote: str) -> None:
     assert state["work_branch"] not in remote_branches(sample_remote)
 
 
+# --------------------------------------------------------------------------- loops and limits
 def test_failing_tests_retry_then_hand_off(tmp_path: Path, sample_remote: str) -> None:
-    broken = "def test_broken() -> None:\n    assert 1 == 2\n"
-    model = ScriptedChatModel(
-        [
-            tool_call("write_file", {"path": "tests/test_broken.py", "content": broken}, "a1"),
-            AIMessage(content="Added a test."),
-            AIMessage(content="I could not fix it."),  # second attempt makes no fix
-        ]
-    )
-    state = code(tmp_path, sample_remote, model)
+    coder = broken_coder()
+    state = run(tmp_path, sample_remote, ScriptedModels(coder=coder))
 
     assert state["status"] == "handed_off"
-    assert state["attempt"] == 2  # first attempt + 1 fix (agent_max_fix_attempts=1)
+    assert state["round"] == 2  # first round + 1 fix (agent_max_fix_attempts=1)
     assert "patch" not in state
-    retry_prompt = model.received[-1][0].content
-    assert "Previous attempt failed (attempt 2 of 2)" in str(retry_prompt)
+    assert state["review"] is None  # failing code never reaches the reviewer
+    retry_prompt = str(coder.received[-1][0].content)
+    assert "Previous attempt failed (round 2)" in retry_prompt
+    assert [r["choice"] for r in state["routes"]] == ["code", "hand_off"]
 
 
-def test_coder_cannot_use_publisher_tools(tmp_path: Path, sample_remote: str) -> None:
-    model = ScriptedChatModel(
+def test_reviewer_findings_go_back_to_the_coder(tmp_path: Path, sample_remote: str) -> None:
+    finding = {
+        "severity": "medium",
+        "file": "calculator.py",
+        "line": 15,
+        "issue": "divide() has no docstring, unlike the module's style",
+        "suggestion": "Add a one-line docstring",
+    }
+    coder = demo_coder()
+    coder._responses.extend(  # second round: address the finding
         [
-            tool_call("git_commit_and_push", {"message": "sneaky"}, "x1"),
-            AIMessage(content="Tried to push."),
+            tool_call(
+                "replace_in_file",
+                {
+                    "path": "calculator.py",
+                    "old": "def divide(a: float, b: float) -> float:\n",
+                    "new": 'def divide(a: float, b: float) -> float:\n    """Divide a by b."""\n',
+                },
+                "r2",
+            ),
+            AIMessage(content="Added the docstring."),
         ]
     )
-    state = code(tmp_path, sample_remote, model)
+    reviewer = ScriptedChatModel([submit_review("request_changes", [finding]), submit_review("approve")])
+    state = run(tmp_path, sample_remote, ScriptedModels(coder=coder, reviewer=reviewer))
 
-    tool_reply = model.received[1][-1]
-    assert "not allowed" in str(tool_reply.content)
-    assert state["status"] == "no_changes"
+    assert state["status"] == "awaiting_approval", state.get("error")
+    assert state["round"] == 2
+    assert state["review_rounds"] == 1
+    assert state["review"]["verdict"] == "approve"
+    assert '"""Divide a by b."""' in state["diff"]
+    second_round_prompt = str(coder.received[-1][0].content)
+    assert "The Reviewer requested changes (round 2)" in second_round_prompt
+    assert "no docstring" in second_round_prompt
+    assert [r["choice"] for r in state["routes"]] == ["review", "code", "review", "package"]
+
+
+def test_unresolved_review_still_reaches_the_human_flagged(tmp_path: Path, sample_remote: str) -> None:
+    finding = {"severity": "high", "file": "calculator.py", "issue": "made-up problem"}
+    reviewer = ScriptedChatModel([submit_review("request_changes", [finding])] * 2)
+    state = run(
+        tmp_path,
+        sample_remote,
+        ScriptedModels(coder=demo_coder(), reviewer=reviewer),
+        agent_max_review_rounds=0,
+    )
+
+    assert state["status"] == "awaiting_approval"  # the human decides, with the objection attached
+    assert state["review"]["verdict"] == "request_changes"
+
+
+def test_llm_call_budget_hands_off(tmp_path: Path, sample_remote: str) -> None:
+    state = run(tmp_path, sample_remote, demo_models(), agent_max_llm_calls=3)
+
+    assert state["status"] == "handed_off"
+    assert "budget exhausted" in str(state["error"])
+    assert state["llm_calls"] == 3
 
 
 def test_loop_detection_hands_off(tmp_path: Path, sample_remote: str) -> None:
-    model = ScriptedChatModel([tool_call("list_files", {}, f"l{i}") for i in range(4)])
-    state = code(tmp_path, sample_remote, model)
+    coder = ScriptedChatModel([tool_call("list_files", {}, f"l{i}") for i in range(4)])
+    state = run(tmp_path, sample_remote, ScriptedModels(coder=coder))
 
     assert state["status"] == "handed_off"
     assert "too many times" in str(state["error"])
 
 
-def test_clone_failure_stops_before_any_edit(tmp_path: Path) -> None:
-    model = demo_model()
-    state = code(tmp_path, (tmp_path / "missing.git").as_uri(), model)
+# --------------------------------------------------------------------------- permissions
+def test_coder_cannot_use_publisher_tools(tmp_path: Path, sample_remote: str) -> None:
+    coder = ScriptedChatModel(
+        [tool_call("git_commit_and_push", {"message": "sneaky"}, "x1"), AIMessage(content="Tried to push.")]
+    )
+    events: list[dict[str, Any]] = []
+    state = run(tmp_path, sample_remote, ScriptedModels(coder=coder), events)
+
+    assert "not allowed" in str(coder.received[1][-1].content)
+    assert state["status"] == "no_changes"
+    assert any(e["event_type"] == "policy_block" and e["actor"] == "coder" for e in events)
+
+
+def test_reviewer_cannot_edit_files(tmp_path: Path, sample_remote: str) -> None:
+    reviewer = ScriptedChatModel(
+        [
+            tool_call("write_file", {"path": "calculator.py", "content": "hacked"}, "w1"),
+            submit_review("approve"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    state = run(tmp_path, sample_remote, ScriptedModels(coder=demo_coder(), reviewer=reviewer), events)
+
+    assert "not allowed" in str(reviewer.received[1][-1].content)
+    assert "hacked" not in state["diff"]
+    assert any(e["event_type"] == "policy_block" and e["actor"] == "reviewer" for e in events)
+
+
+def test_clone_failure_stops_before_any_llm_call(tmp_path: Path) -> None:
+    models = demo_models()
+    state = run(tmp_path, (tmp_path / "missing.git").as_uri(), models)
 
     assert state["status"] == "failed"
     assert "Could not clone" in str(state["error"])
-    assert model.received == []  # the LLM was never called
+    assert all(model.received == [] for model in models.scripts.values())
 
 
-def test_audit_sink_receives_every_tool_call(tmp_path: Path, sample_remote: str) -> None:
+# --------------------------------------------------------------------------- LLM supervisor
+def choose(next_step: str) -> AIMessage:
+    return tool_call("choose_next_step", {"next": next_step, "reason": "scripted"}, "route")
+
+
+def test_llm_supervisor_proposal_outside_policy_is_blocked(tmp_path: Path, sample_remote: str) -> None:
+    supervisor = ScriptedChatModel([choose("package")])  # tests are failing: not allowed
     events: list[dict[str, Any]] = []
-
-    async def sink(event: dict[str, Any]) -> None:
-        events.append(event)
-
-    asyncio.run(
-        run_coding_job(
-            JobRequest(repo_url=sample_remote, task=TASK, test_command="python -m pytest -q"),
-            make_settings(tmp_path),
-            job_id=JOB_ID,
-            model=demo_model(),
-            audit_sink=sink,
-        )
+    state = run(
+        tmp_path,
+        sample_remote,
+        ScriptedModels(coder=broken_coder(), supervisor=supervisor),
+        events,
+        supervisor_mode="llm",
     )
-    tools = [e["tool"] for e in events]
-    assert tools[:2] == ["git_clone", "list_files"]
-    assert {"replace_in_file", "run_tests", "export_patch"} <= set(tools)
-    assert all(e["job_id"] == JOB_ID for e in events)
+
+    first = state["routes"][0]
+    assert (first["choice"], first["source"]) == ("code", "policy")
+    blocks = [e for e in events if e["event_type"] == "policy_block" and e["actor"] == "supervisor"]
+    assert "'package' is not allowed" in blocks[0]["result_summary"]
+    assert state["status"] == "handed_off"
+    assert "patch" not in state
+
+
+def test_llm_supervisor_valid_choice_is_followed(tmp_path: Path, sample_remote: str) -> None:
+    supervisor = ScriptedChatModel([choose("hand_off")])
+    state = run(
+        tmp_path,
+        sample_remote,
+        ScriptedModels(coder=broken_coder(), supervisor=supervisor),
+        supervisor_mode="llm",
+    )
+
+    assert state["round"] == 1  # supervisor stopped after the first failure
+    assert (state["routes"][0]["choice"], state["routes"][0]["source"]) == ("hand_off", "llm")
+    assert state["status"] == "handed_off"
+
+
+def test_llm_supervisor_can_ask_for_a_replan(tmp_path: Path, sample_remote: str) -> None:
+    supervisor = ScriptedChatModel([choose("plan")])
+    state = run(
+        tmp_path,
+        sample_remote,
+        ScriptedModels(coder=broken_coder(), supervisor=supervisor),
+        supervisor_mode="llm",
+    )
+
+    assert state["replans"] == 1
+    assert [r.split("@")[0] for r in state["prompt_refs"]].count("planner") == 2
+    assert state["status"] == "handed_off"

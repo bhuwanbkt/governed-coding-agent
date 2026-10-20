@@ -43,6 +43,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     APP_VERSION=${GIT_SHA} \
     WORKSPACES_DIR=/tmp/workspaces \
+    EMBEDDING_CACHE_DIR=/tmp/models \
     PORT=8080
 
 USER app

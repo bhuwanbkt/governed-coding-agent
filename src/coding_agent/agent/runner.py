@@ -1,6 +1,6 @@
-"""Runs the two halves of a job, each in its own fresh workspace and MCP server:
+"""Runs the two halves of a job, each in its own fresh workspace and MCP servers:
 
-1. `run_coding_job`: clone, code, test, and package the result for human review.
+1. `run_coding_job`: clone, index, plan, code, test, review, and package the result for human review.
 2. `run_publish_job`: after approval, re-apply the approved patch and open the PR.
 
 Used by the CLI (both halves in one process, with a terminal approval in between) and by the
@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from coding_agent.agent.graph import CODER_TOOLS, AgentDeps, AgentLimits, AgentState, build_graph
-from coding_agent.agent.llm import ToolCallingModel, build_chat_model
+from coding_agent.agent.graph import AgentDeps, AgentLimits, AgentState, build_graph
+from coding_agent.agent.llm import ModelProvider, build_models
 from coding_agent.agent.publish import PublishRequest, PublishResult, publish
 from coding_agent.agent.toolbox import AuditSink, LoopDetectedError, Toolbox
 from coding_agent.config import Settings
@@ -69,6 +69,21 @@ def _server_env(settings: Settings) -> dict[str, str]:
     return env
 
 
+def _index_env(settings: Settings) -> dict[str, str]:
+    """The code index server only reads the clone: no Git identity, no tokens."""
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", "/tmp"),  # noqa: S108 - fallback cache location only
+        "RETRIEVAL_EMBEDDINGS": "true" if settings.retrieval_embeddings else "false",
+        "EMBEDDING_MODEL": settings.embedding_model,
+    }
+    if settings.embedding_cache_dir is not None:
+        env["EMBEDDING_CACHE_DIR"] = str(settings.embedding_cache_dir)
+    if virtual_env := os.environ.get("VIRTUAL_ENV"):
+        env["VIRTUAL_ENV"] = virtual_env
+    return env
+
+
 def _workspace(settings: Settings, job_id: str, phase: str) -> Path:
     return Path(settings.workspaces_dir).resolve() / f"{job_id}-{phase}"
 
@@ -83,10 +98,11 @@ async def run_coding_job(
     settings: Settings,
     *,
     job_id: str | None = None,
-    model: ToolCallingModel | None = None,
+    models: ModelProvider | None = None,
     audit_sink: AuditSink | None = None,
 ) -> AgentState:
-    """Code and test the change. Ends in awaiting_approval, no_changes, handed_off or failed."""
+    """Plan, code, test and review the change.
+    Ends in awaiting_approval, no_changes, handed_off or failed."""
     job_id = job_id or new_job_id()
     token = job_id_var.set(job_id)
     workspace = _workspace(settings, job_id, "code")
@@ -102,18 +118,26 @@ async def run_coding_job(
     final: dict[str, Any]
     try:
         async with Toolbox.connect(
-            workspace, job_id=job_id, env=_server_env(settings), audit_sink=audit_sink
+            workspace,
+            job_id=job_id,
+            env=_server_env(settings),
+            audit_sink=audit_sink,
+            servers=("workspace", "code_index"),
+            server_env={"code_index": _index_env(settings)},
         ) as toolbox:
-            chat_model = model or build_chat_model(settings, toolbox.schemas(sorted(CODER_TOOLS)))
             graph = build_graph(
                 AgentDeps(
                     toolbox=toolbox,
-                    model=chat_model,
+                    models=models or build_models(settings),
                     prompts=get_registry(),
                     limits=AgentLimits(
-                        max_attempts=1 + settings.agent_max_fix_attempts,
+                        max_fix_attempts=settings.agent_max_fix_attempts,
                         max_llm_turns=settings.agent_max_llm_turns,
-                        min_llm_interval_seconds=0.0 if model else settings.llm_min_interval_seconds,
+                        max_llm_calls=settings.agent_max_llm_calls,
+                        max_review_rounds=settings.agent_max_review_rounds,
+                        max_replans=settings.agent_max_replans,
+                        min_llm_interval_seconds=0.0 if models else settings.llm_min_interval_seconds,
+                        supervisor_mode=settings.supervisor_mode,
                     ),
                     provider=settings.llm_provider,
                 )
@@ -121,7 +145,7 @@ async def run_coding_job(
             # Handle errors inside the session: once they cross the MCP client's task group
             # they arrive wrapped in an ExceptionGroup.
             try:
-                final = await graph.ainvoke(initial, config={"recursion_limit": 50})
+                final = await graph.ainvoke(initial, config={"recursion_limit": 100})
             except LoopDetectedError as exc:
                 final = {**initial, "status": "handed_off", "error": str(exc)}
     except Exception as exc:

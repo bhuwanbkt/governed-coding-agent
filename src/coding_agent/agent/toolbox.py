@@ -1,4 +1,4 @@
-"""Client side of MCP: connects to the workspace server and enforces governance on every call.
+"""Client side of MCP: connects to the tool servers and enforces governance on every call.
 
 Agents never talk to the MCP session directly. They go through `Toolbox.call`, which:
 - rejects tools outside the calling agent's allowlist (least privilege)
@@ -13,8 +13,8 @@ import logging
 import sys
 import time
 from collections import Counter
-from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,6 +27,11 @@ logger = logging.getLogger("coding_agent.audit")
 MAX_IDENTICAL_CALLS = 3
 AuditSink = Callable[[dict[str, Any]], Awaitable[None]]
 _SECRET_ARG_NAMES = {"token", "password", "secret", "api_key"}
+# MCP servers by name. Each runs as its own stdio subprocess for one job.
+SERVER_MODULES = {
+    "workspace": "coding_agent.mcp_servers.workspace_server",
+    "code_index": "coding_agent.mcp_servers.code_index_server",
+}
 
 
 class ToolNotAllowedError(PermissionError):
@@ -53,7 +58,7 @@ class ToolSpec:
 
 @dataclass
 class Toolbox:
-    session: ClientSession
+    sessions: dict[str, ClientSession]  # tool name -> session of the server that provides it
     specs: dict[str, ToolSpec]
     job_id: str = "local"
     audit_sink: AuditSink | None = None  # e.g. writes to the audit_log table (phase 2)
@@ -68,21 +73,32 @@ class Toolbox:
         job_id: str,
         env: Mapping[str, str] | None = None,
         audit_sink: AuditSink | None = None,
+        servers: Sequence[str] = ("workspace",),
+        server_env: Mapping[str, Mapping[str, str]] | None = None,
     ) -> AsyncIterator[Toolbox]:
-        """Start the workspace MCP server as a subprocess and open a session to it."""
-        params = StdioServerParameters(
-            command=sys.executable,
-            args=["-m", "coding_agent.mcp_servers.workspace_server"],
-            env={"WORKSPACE_DIR": str(workspace_dir), **(env or {})},
-        )
-        async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
-            await session.initialize()
-            listed = await session.list_tools()
-            specs = {
-                t.name: ToolSpec(t.name, t.description or "", dict(t.input_schema or {}))
-                for t in listed.tools
-            }
-            yield cls(session=session, specs=specs, job_id=job_id, audit_sink=audit_sink)
+        """Start the named MCP servers as subprocesses and open a session to each.
+        `server_env` replaces `env` for the servers it names (least privilege: e.g. the code
+        index never receives the GitHub token)."""
+        sessions: dict[str, ClientSession] = {}
+        specs: dict[str, ToolSpec] = {}
+        async with AsyncExitStack() as stack:
+            for server in servers:
+                params = StdioServerParameters(
+                    command=sys.executable,
+                    args=["-m", SERVER_MODULES[server]],
+                    env={"WORKSPACE_DIR": str(workspace_dir), **_env_for(server, env, server_env)},
+                )
+                read, write = await stack.enter_async_context(stdio_client(params))
+                session = await stack.enter_async_context(ClientSession(read, write))
+                await session.initialize()
+                for tool in (await session.list_tools()).tools:
+                    if tool.name in specs:
+                        raise RuntimeError(f"tool {tool.name!r} is provided by two servers")
+                    specs[tool.name] = ToolSpec(
+                        tool.name, tool.description or "", dict(tool.input_schema or {})
+                    )
+                    sessions[tool.name] = session
+            yield cls(sessions=sessions, specs=specs, job_id=job_id, audit_sink=audit_sink)
 
     def schemas(self, allowed: Collection[str]) -> list[dict[str, Any]]:
         return [self.specs[name].to_openai() for name in allowed if name in self.specs]
@@ -102,12 +118,28 @@ class Toolbox:
             await self._audit(actor, name, args, allowed=False, result="blocked: loop detected", start=start)
             raise LoopDetectedError(f"{actor} repeated {name} with identical arguments too many times")
 
-        result = await self.session.call_tool(name, dict(args))
+        result = await self.sessions[name].call_tool(name, dict(args))
         text = "\n".join(getattr(part, "text", "") for part in getattr(result, "content", []) or [])
         if getattr(result, "is_error", False):
             text = f"ERROR: {text}"
         await self._audit(actor, name, args, allowed=True, result=text, start=start)
         return text
+
+    async def record(self, actor: str, event_type: str, summary: str, *, allowed: bool = True) -> None:
+        """Audit a decision that isn't a tool call, e.g. a routing decision or a submitted plan."""
+        event = {
+            "event_type": event_type,
+            "job_id": self.job_id,
+            "actor": actor,
+            "tool": None,
+            "allowed": allowed,
+            "args_masked": None,
+            "result_summary": summary[:300],
+            "duration_ms": None,
+        }
+        logger.info(event_type, extra=event)
+        if self.audit_sink is not None:
+            await self.audit_sink(event)
 
     async def _audit(
         self, actor: str, tool: str, args: Mapping[str, Any], *, allowed: bool, result: str, start: float
@@ -126,6 +158,14 @@ class Toolbox:
         if self.audit_sink is not None:
             # Fail closed: if the audit row can't be written, the job stops rather than act unrecorded.
             await self.audit_sink(event)
+
+
+def _env_for(
+    server: str, env: Mapping[str, str] | None, server_env: Mapping[str, Mapping[str, str]] | None
+) -> dict[str, str]:
+    if server_env is not None and server in server_env:
+        return dict(server_env[server])
+    return dict(env or {})
 
 
 def _mask_args(args: Mapping[str, Any]) -> dict[str, Any]:

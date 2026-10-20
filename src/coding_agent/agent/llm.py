@@ -14,13 +14,18 @@ class ToolCallingModel(Protocol):
     async def ainvoke(self, input: list[BaseMessage], /) -> BaseMessage: ...
 
 
+class ModelProvider(Protocol):
+    """Gives each agent role a chat model with exactly that role's tools bound."""
+
+    def for_role(self, role: str, tools: list[dict[str, Any]]) -> ToolCallingModel: ...
+
+
 class LLMConfigError(RuntimeError):
     pass
 
 
-def build_chat_model(settings: Settings, tools: list[dict[str, Any]]) -> ToolCallingModel:
-    """Return a chat model with `tools` bound, for the configured provider."""
-    if settings.llm_provider == "groq":
+class GroqModels:
+    def __init__(self, settings: Settings) -> None:
         if settings.groq_api_key is None:
             raise LLMConfigError("GROQ_API_KEY is not set (add it to .env or the environment)")
         from langchain_groq import ChatGroq  # imported lazily: tests never need the SDK
@@ -32,14 +37,20 @@ def build_chat_model(settings: Settings, tools: list[dict[str, Any]]) -> ToolCal
             "timeout": settings.llm_timeout_seconds,
             "max_retries": 3,
         }
-        model = ChatGroq(**options)
-        return cast(ToolCallingModel, model.bind_tools(tools))
+        self._base = ChatGroq(**options)
 
+    def for_role(self, role: str, tools: list[dict[str, Any]]) -> ToolCallingModel:
+        return cast(ToolCallingModel, self._base.bind_tools(tools) if tools else self._base)
+
+
+def build_models(settings: Settings) -> ModelProvider:
+    """Models for the configured provider."""
+    if settings.llm_provider == "groq":
+        return GroqModels(settings)
     if settings.llm_provider == "fake":
-        from coding_agent.agent.fake_llm import demo_model
+        from coding_agent.agent.fake_llm import demo_models
 
-        return demo_model()
-
+        return demo_models()
     raise LLMConfigError(f"unknown LLM provider {settings.llm_provider!r}")
 
 

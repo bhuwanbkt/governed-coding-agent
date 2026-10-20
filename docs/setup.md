@@ -127,6 +127,16 @@ roll back.
 
 Keep each person's key private; the user name before `:` is what the audit log records.
 
+## 8. Phase 3: multi-agent + retrieval
+
+Nothing new is required. Optional Northflank variables:
+
+| Variable | Default | When to change |
+|---|---|---|
+| `SUPERVISOR_MODE` | `deterministic` | `llm` to let a supervisor LLM propose routing (policy-checked) |
+| `AGENT_MAX_LLM_CALLS` | `40` | Lower to cap cost; jobs that hit it are handed off |
+| `RETRIEVAL_EMBEDDINGS` | `false` | `true` for hybrid search; check memory first (model ~100 MB + ONNX runtime) |
+
 ## Coming in later phases
 
 | Phase | Setup needed |

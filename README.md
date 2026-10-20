@@ -8,8 +8,8 @@ plans the change, writes the code, runs the tests and reviews the diff, then **w
 human to approve** before it pushes a branch and opens a pull request. Every tool call is
 permission-checked, recorded in an append-only audit log, traced and measured.
 
-> **Status:** Phase 1 (core loop) — a single governed coding agent runs from the CLI.
-> See the [roadmap](#roadmap).
+> **Status:** Phase 3 — planner, coder, tester and reviewer agents with LlamaIndex code search,
+> running behind a job API with human approval. See the [roadmap](#roadmap).
 
 ## Architecture
 
@@ -27,16 +27,29 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    A[Clone + index repo] --> S{Supervisor}
-    S --> P[Planner] --> C[Coder] --> T[Tester]
-    T -- tests fail --> C
-    T -- tests pass --> R[Reviewer]
-    R -- changes needed --> C
-    R -- looks good --> H[/Human approval/]
-    S -- limits hit --> X[Human handoff]
+    A[Clone] --> I[Index repo<br/>LlamaIndex] --> P[Planner] --> C[Coder] --> T[Tester]
+    T --> D1{Router}
+    D1 -- tests fail, budget left --> C
+    D1 -. re-plan, LLM mode .-> P
+    D1 -- tests pass --> R[Reviewer]
+    D1 -- out of budget --> X[Hand off to a human]
+    R --> D2{Router}
+    D2 -- blocking findings, round left --> C
+    D2 -- approved or rounds used --> H[/Human approval/]
     H -- approve --> PB[Publisher: push + PR]
     H -- reject --> Z[Stop, nothing pushed]
 ```
+
+The router is code. With `SUPERVISOR_MODE=llm` a supervisor LLM proposes the next step and the
+router accepts it only if the policy allows it in that state ([ADR 0008](docs/adr/0008-deterministic-supervisor.md)).
+
+| Agent | LLM | Tools | Output |
+|---|---|---|---|
+| Planner | yes | read files, `search_code`, `search_codebase` | Structured plan: files, steps, tests, risks |
+| Coder | yes | read tools + `write_file`, `replace_in_file` | Code changes and a summary |
+| Tester | no | `run_tests` | Pass/fail with output |
+| Reviewer | yes | read tools + `git_diff` | Verdict and findings (severity, file, line) |
+| Supervisor (optional) | yes | none | Proposed next step, validated by policy |
 
 ## Tech stack
 
@@ -67,7 +80,7 @@ uv run uvicorn coding_agent.api.main:app --reload --port 8080
 
 Open http://localhost:8080/docs. Or run the whole stack in containers: `docker compose up --build`.
 
-### Run the agent (phase 1 CLI)
+### Run the agent from the CLI
 
 ```bash
 # Offline demo: scripted LLM, local copy of the sample repo, no keys needed
@@ -79,9 +92,10 @@ uv run coding-agent run --repo https://github.com/<you>/agent-sandbox-repo \
   --task "Add a divide(a, b) function that raises ValueError on zero, with tests"
 ```
 
-The agent clones the repo into `workspaces/<job-id>/`, edits code, runs the tests (retrying with
-the failure output if they fail), then **stops and shows you the diff**. Nothing is pushed unless
-you type `yes`. Then it pushes `agent/<job-id>` and opens a pull request.
+The agents clone and index the repo, plan, edit the code, run the tests (fixing failures) and
+review the diff, then the CLI **stops and shows you the plan, review and diff**. Nothing is
+pushed unless you type `yes`. Then it pushes `agent/<job-id>` and opens a pull request.
+Add `--supervisor llm` to try LLM-proposed routing.
 
 ### Use the job API (phase 2)
 
@@ -113,10 +127,13 @@ Job states: `queued → running → awaiting_approval → approved → publishin
 ### Tests
 
 ```bash
-uv run pytest                                    # unit tests
-TEST_DATABASE_URL=postgresql://agent:agent@localhost:5432/agent \
-  uv run pytest -m integration                   # against the local Postgres
+uv run pytest                     # everything; integration tests start a throwaway Postgres
+uv run pytest -m "not integration" # fast: skip the database tests
 ```
+
+Integration tests use `TEST_DATABASE_URL` if it is set (CI does this). Otherwise they start a
+disposable Postgres with [Testcontainers](https://testcontainers.com/) on a random port (Docker
+must be running), and skip if Docker isn't available. They never use `DATABASE_URL` from `.env`.
 
 In VS Code, the **Testing** panel and the **Run and Debug** configs (`API`, `Pytest`, `Alembic`)
 are preconfigured in `.vscode/`.
@@ -136,7 +153,8 @@ Setup steps for Neon, Northflank and GitHub are in [docs/setup.md](docs/setup.md
 ## Governance (by design)
 
 - Scoped tool permissions per agent; least privilege
-- Bounded autonomy: step limits, timeouts, loop detection, human handoff
+- Bounded autonomy: fix/re-plan/review rounds, LLM-call budget per job, loop detection, human handoff
+- Routing guarantees in code: an LLM may propose the next step, the policy decides
 - Human approval before any push, with **separation of duties** (enforced in the database)
 - **Append-only audit log** (UPDATE/DELETE/TRUNCATE blocked by database triggers)
 - Secret/PII masking, repo allowlist, prompt-injection controls, cost budgets
@@ -145,8 +163,9 @@ Setup steps for Neon, Northflank and GitHub are in [docs/setup.md](docs/setup.md
 
 ```
 src/coding_agent/
-  agent/          LangGraph workflow, governed MCP Toolbox, LLM factory, job runner
-  mcp_servers/    workspace MCP server (sandboxed files, tests, git)
+  agent/          LangGraph multi-agent workflow, roles, schemas, governed MCP Toolbox, runner
+  retrieval/      LlamaIndex chunking, metadata, hybrid BM25 + vector search
+  mcp_servers/    workspace server (files, tests, git) and code_index server (search)
   prompts/        versioned prompt templates + registry
   api/            FastAPI app: job routes, API-key auth, middleware (UI in phase 5)
   worker/         Postgres queue worker: claim, heartbeat, recover, code, publish
@@ -165,7 +184,7 @@ docs/             architecture, ADRs, runbook, setup
 - [x] **0 Foundation** — repo hygiene, CI/CD to Northflank, schema, health checks
 - [x] **1 Core loop** — MCP workspace server, single agent, prompt registry, push + PR
 - [x] **2 API + worker** — Postgres job queue, audit logging, restart recovery
-- [ ] **3 Multi-agent + retrieval** — supervisor + 5 agents, LlamaIndex
+- [x] **3 Multi-agent + retrieval** — planner, coder, tester, reviewer; guarded supervisor; LlamaIndex
 - [ ] **4 Governance** — permissions, guards, approvals, budgets, masking
 - [ ] **5 UI + login** — GitHub OAuth, job timeline, approval screen
 - [ ] **6 Evals + observability** — golden tasks, retrieval evals, Langfuse, SLOs

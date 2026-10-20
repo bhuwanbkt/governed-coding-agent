@@ -55,6 +55,12 @@ class JobDetail(JobSummary):
         description="Send this back with your decision to approve this exact diff"
     )
     prompt_refs: list[str]
+    plan: dict[str, Any] | None = Field(description="The planner agent's plan")
+    review: dict[str, Any] | None = Field(
+        description="The reviewer agent's verdict and findings; advisory, the human decides"
+    )
+    routes: list[dict[str, Any]] = Field(description="Routing decisions between agents, with reasons")
+    llm_calls: int
 
 
 class Decision(BaseModel):

@@ -14,6 +14,7 @@ import sys
 from coding_agent.agent.graph import tail
 from coding_agent.agent.publish import PublishRequest
 from coding_agent.agent.runner import JobRequest, run_coding_job, run_publish_job
+from coding_agent.agent.schemas import Plan, ReviewVerdict
 from coding_agent.config import get_settings
 from coding_agent.observability.logging import configure_logging
 
@@ -30,13 +31,24 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
     run.add_argument("--test-command", default="pytest -q", help="allow-listed test command")
     run.add_argument("--llm", choices=["groq", "fake"], help="override LLM_PROVIDER")
     run.add_argument("--model", help="override LLM_MODEL")
+    run.add_argument(
+        "--supervisor", choices=["deterministic", "llm"], help="override SUPERVISOR_MODE for this run"
+    )
     sub.add_parser("worker", help="process queued and approved jobs from the database")
     return parser.parse_args(argv)
 
 
 async def _run_interactive(args: argparse.Namespace) -> int:
     settings = get_settings()
-    overrides = {k: v for k, v in {"llm_provider": args.llm, "llm_model": args.model}.items() if v}
+    overrides = {
+        k: v
+        for k, v in {
+            "llm_provider": args.llm,
+            "llm_model": args.model,
+            "supervisor_mode": args.supervisor,
+        }.items()
+        if v
+    }
     if overrides:
         settings = settings.model_copy(update=overrides)
 
@@ -52,7 +64,16 @@ async def _run_interactive(args: argparse.Namespace) -> int:
         return 0 if status == "no_changes" else 1
 
     print(f"\n{_RULE}\nAPPROVAL REQUIRED  job {state['job_id']}\n{_RULE}")
-    print(f"Task: {state['task']}\n\nAgent summary:\n{state.get('coder_summary', '')}\n")
+    print(f"Task: {state['task']}\n")
+    if state.get("plan"):
+        print(f"Plan (planner):\n{Plan.model_validate(state['plan']).as_markdown()}\n")
+    print(f"Agent summary (coder):\n{state.get('coder_summary', '')}\n")
+    review = state.get("review") or {}
+    if review.get("verdict") in ("approve", "request_changes"):
+        print(f"Review (reviewer agent):\n{ReviewVerdict.model_validate(review).as_markdown()}\n")
+    elif review:
+        print(f"Review (reviewer agent): {review.get('summary')}\n")
+    print(f"LLM calls: {state.get('llm_calls', 0)}\n")
     print(f"Tests:\n{tail(state.get('test_output', ''), 20)}\n\nDiff:\n{state.get('diff', '')}")
     print(f"Patch SHA-256: {state['diff_sha256']}\n{_RULE}")
     answer = await asyncio.to_thread(
@@ -75,6 +96,8 @@ async def _run_interactive(args: argparse.Namespace) -> int:
             coder_summary=state.get("coder_summary", ""),
             test_output=state.get("test_output", ""),
             prompt_refs=state.get("prompt_refs", []),
+            plan=state.get("plan"),
+            review=state.get("review"),
         ),
         settings,
     )

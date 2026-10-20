@@ -32,6 +32,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 _VERSION_FILE = re.compile(r"^v(?P<version>\d+)(?:\.(?P<provider>[a-z0-9_-]+))?\.md$")
 _FRONT_MATTER = re.compile(r"\A---\n(?P<meta>.*?)\n---\n(?P<body>.*)\Z", re.DOTALL)
+_INCLUDE = re.compile(r"""{%-?\s*include\s+["']([^"']+)["']""")
 
 
 class PromptNotFoundError(LookupError):
@@ -111,9 +112,20 @@ class PromptRegistry:
             name=name,
             version=resolved_version,
             provider_variant=variant,
-            sha256=hashlib.sha256(raw.encode()).hexdigest(),
+            sha256=hashlib.sha256(_with_includes(raw, self.root).encode()).hexdigest(),
             content=content,
         )
+
+
+def _with_includes(raw: str, root: Path, seen: frozenset[str] = frozenset()) -> str:
+    """Template source followed by every partial it includes (recursively), so the prompt hash
+    changes when a shared partial changes, not only when the template file itself does."""
+    parts = [raw]
+    for name in _INCLUDE.findall(raw):
+        if name not in seen:
+            partial = (root / name).read_text(encoding="utf-8")
+            parts.append(_with_includes(partial, root, seen | {name}))
+    return "\n".join(parts)
 
 
 @lru_cache
