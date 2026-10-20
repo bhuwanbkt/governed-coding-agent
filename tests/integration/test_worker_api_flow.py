@@ -1,13 +1,12 @@
 """Full governed flow against a real Postgres: API -> queue -> worker -> approval -> publish.
 
-Runs in CI (Postgres service container) or locally with TEST_DATABASE_URL set. Uses the
+Runs in CI (Postgres service container) or locally in a Testcontainers Postgres. Uses the
 scripted LLM and a local bare Git remote, so it needs no network or API keys.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -18,17 +17,14 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from coding_agent.agent.fake_llm import demo_model
+from coding_agent.agent.fake_llm import demo_models
 from coding_agent.api.main import create_app
 from coding_agent.config import get_settings
 from coding_agent.db import jobs as repo
 from coding_agent.db.session import get_engine
 from coding_agent.worker.main import Worker
 
-pytestmark = [
-    pytest.mark.integration,
-    pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="TEST_DATABASE_URL not set"),
-]
+pytestmark = pytest.mark.integration
 
 ROOT = Path(__file__).resolve().parents[2]
 # Obviously fake, low-entropy test keys.
@@ -38,8 +34,8 @@ TASK = "Add a divide(a, b) function that raises ValueError on zero, with tests"
 
 
 @pytest.fixture
-def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DATABASE_URL", os.environ["TEST_DATABASE_URL"])
+def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, database_url: str) -> None:
+    monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setenv("API_KEYS", f"alice:{ALICE['X-API-Key']},bob:{BOB['X-API-Key']}")
     monkeypatch.setenv("ALLOWED_REPO_PREFIXES", "file://")
     monkeypatch.setenv("LLM_PROVIDER", "fake")
@@ -54,7 +50,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def worker() -> Worker:
-    return Worker(get_settings(), worker_id="test-worker", model_factory=demo_model)
+    return Worker(get_settings(), worker_id="test-worker", model_factory=demo_models)
 
 
 def remote_branches(remote_uri: str) -> str:
@@ -85,6 +81,11 @@ def test_submit_code_approve_publish(sample_remote: str) -> None:
     job = client.get(f"/jobs/{job_id}", headers=ALICE).json()
     assert job["status"] == "awaiting_approval", job["error"]
     assert "def divide" in job["diff"]
+    assert job["plan"]["files_to_change"][0]["path"] == "calculator.py"
+    assert job["review"]["verdict"] == "approve"
+    assert [r["choice"] for r in job["routes"]] == ["review", "package"]
+    assert job["llm_calls"] == 7
+    assert [ref.split("#")[0] for ref in job["prompt_refs"]] == ["planner@v1", "coder@v2", "reviewer@v1"]
     sha = job["diff_sha256"]
     assert job["work_branch"] not in remote_branches(sample_remote)  # nothing pushed before approval
 
@@ -117,6 +118,8 @@ def test_submit_code_approve_publish(sample_remote: str) -> None:
     tools = [e["tool"] for e in audit if e["event_type"] == "tool_call"]
     assert {
         "git_clone",
+        "build_index",
+        "search_codebase",
         "replace_in_file",
         "run_tests",
         "export_patch",

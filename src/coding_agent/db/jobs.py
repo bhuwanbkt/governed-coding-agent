@@ -19,6 +19,8 @@ from coding_agent.db.session import get_engine
 
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "rejected", "handed_off", "no_changes", "cancelled"})
 
+_JSON_COLUMNS = frozenset({"prompt_refs", "plan", "review", "routes"})
+
 # Columns `update_job` may set. Anything else is a programming error.
 _UPDATABLE = frozenset(
     {
@@ -32,6 +34,10 @@ _UPDATABLE = frozenset(
         "patch",
         "diff_sha256",
         "prompt_refs",
+        "plan",
+        "review",
+        "routes",
+        "llm_calls",
         "tokens_in",
         "tokens_out",
         "cost_usd",
@@ -76,6 +82,10 @@ class Job:
     patch: str | None
     diff_sha256: str | None
     prompt_refs: list[str]
+    plan: dict[str, Any] | None
+    review: dict[str, Any] | None
+    routes: list[dict[str, Any]]
+    llm_calls: int
     locked_by: str | None
     heartbeat_at: datetime | None
     created_at: datetime
@@ -86,8 +96,11 @@ class Job:
     @classmethod
     def from_row(cls, row: RowMapping) -> Job:
         values = {f.name: row[f.name] for f in fields(cls)}
-        refs = values["prompt_refs"]
-        values["prompt_refs"] = list(json.loads(refs) if isinstance(refs, str) else refs or [])
+        for column in _JSON_COLUMNS:
+            if isinstance(values[column], str):  # drivers without JSONB decoding
+                values[column] = json.loads(values[column])
+        values["prompt_refs"] = list(values["prompt_refs"] or [])
+        values["routes"] = list(values["routes"] or [])
         return cls(**values)
 
 
@@ -187,9 +200,9 @@ def update_job(job_id: uuid.UUID, *, actor: str, **values: Any) -> Job:
     params: dict[str, Any] = {"id": job_id}
     assignments = ["updated_at = now()"]
     for column, value in values.items():
-        if column == "prompt_refs":
-            assignments.append("prompt_refs = CAST(:prompt_refs AS JSONB)")
-            params["prompt_refs"] = json.dumps(value)
+        if column in _JSON_COLUMNS:
+            assignments.append(f"{column} = CAST(:{column} AS JSONB)")
+            params[column] = None if value is None else json.dumps(value, default=str)
         else:
             assignments.append(f"{column} = :{column}")
             params[column] = value

@@ -8,8 +8,11 @@ SHA-256 a human approved. If anything differs, it refuses.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
-from coding_agent.agent.graph import PUBLISHER_TOOLS, tail
+from coding_agent.agent.graph import tail
+from coding_agent.agent.roles import PUBLISHER_TOOLS
+from coding_agent.agent.schemas import Plan, ReviewVerdict
 from coding_agent.agent.toolbox import Toolbox
 
 ACTOR = "publisher"
@@ -28,6 +31,8 @@ class PublishRequest:
     coder_summary: str = ""
     test_output: str = ""
     prompt_refs: list[str] = field(default_factory=list)
+    plan: dict[str, Any] | None = None
+    review: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -37,11 +42,20 @@ class PublishResult:
     error: str | None = None
 
 
+def _section(title: str, model: type[Plan] | type[ReviewVerdict], data: dict[str, Any] | None) -> str:
+    try:
+        return f"## {title}\n\n{model.model_validate(data).as_markdown()}\n\n" if data else ""
+    except ValueError:  # e.g. a "not_reviewed" placeholder
+        return f"## {title}\n\n{(data or {}).get('summary', '(none)')}\n\n"
+
+
 def pr_body(request: PublishRequest) -> str:
     return (
         f"## Task\n\n{request.task}\n\n"
-        f"## Agent summary\n\n{request.coder_summary or '(none)'}\n\n"
-        f"## Tests\n\n```\n{tail(request.test_output, 15)}\n```\n\n"
+        + _section("Plan (planner agent)", Plan, request.plan)
+        + f"## Agent summary\n\n{request.coder_summary or '(none)'}\n\n"
+        + _section("Automated review (reviewer agent)", ReviewVerdict, request.review)
+        + f"## Tests\n\n```\n{tail(request.test_output, 15)}\n```\n\n"
         f"---\nJob `{request.job_id}` · patch `{request.approved_sha256[:12]}` approved by "
         f"**{request.approved_by}** before push · prompts: {', '.join(request.prompt_refs) or 'n/a'}"
     )

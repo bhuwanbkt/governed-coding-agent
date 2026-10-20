@@ -44,6 +44,14 @@ Check `GET /jobs/{id}` (status, `error`, `attempts`) and `GET /jobs/{id}/audit` 
   `agent/<id>` branch or open PR before resubmitting; publishing is never retried automatically.
 - **`failed` with a `git apply` error (patch failed):** the base branch moved after review. Resubmit the
   task; the new diff needs a new approval.
+- **`handed_off` with "LLM call budget exhausted":** the agents used `AGENT_MAX_LLM_CALLS`.
+  Check `routes` and the audit log for a loop (e.g. repeated review rounds); raise the budget only
+  if the task is legitimately large.
+- **`handed_off` with "planner did not produce a valid plan":** the model didn't call
+  `submit_plan` with valid arguments; see the planner's `system` events in the audit log.
+- **Search quality is poor or `index_summary` says unavailable:** check the `indexer` tool call in
+  the audit log. With `RETRIEVAL_EMBEDDINGS=true`, a model that can't load falls back to BM25
+  ("embeddings unavailable"); watch memory on Northflank before enabling it.
 - **Groq 429 / rate limit:** retried with backoff; raise `LLM_MIN_INTERVAL_SECONDS` if frequent.
 - **`403 repository is not on the allowlist`:** add the prefix to `ALLOWED_REPO_PREFIXES`.
 - **API returns 503 "API keys are not configured":** set `API_KEYS` on the service.

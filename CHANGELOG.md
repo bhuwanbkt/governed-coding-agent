@@ -5,7 +5,25 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Added
+### Added (phase 3)
+- Multi-agent workflow: planner, coder, tester and reviewer agents with per-role tools, prompts
+  and structured outputs (`submit_plan`, `submit_review`).
+- Router with `SUPERVISOR_MODE=deterministic|llm`: an LLM supervisor may propose the next step;
+  a policy table and hard rules decide, and blocked proposals are audited (ADR 0008).
+- LlamaIndex retrieval: code-aware chunking (`CodeSplitter`), chunk metadata, BM25 and optional
+  local embeddings merged with reciprocal rank fusion, served by a new `code_index` MCP server (ADR 0009).
+- Budgets: LLM calls per job, review rounds and re-plans; exhausted budgets hand off to a human.
+- Migration 0003: `plan`, `review`, `routes`, `llm_calls` on jobs; shown in the API, CLI and PR body.
+- Retrieval eval (hit@3 on golden queries) in the unit tests.
+- Integration tests start their own disposable Postgres (Testcontainers) when
+  `TEST_DATABASE_URL` isn't set; no manual database setup or port clashes.
+
+### Changed (phase 3)
+- Prompts: `coder@v2` follows the plan and reviewer findings; new `planner@v1`, `reviewer@v1`,
+  `supervisor@v1`. Prompt hashes now include the partials a template uses.
+- The Toolbox connects to several MCP servers; the code index server gets no tokens.
+
+### Added (phase 2)
 - Phase 2: job API (`POST /jobs`, `GET /jobs`, `GET /jobs/{id}`, `POST /jobs/{id}/decision`,
   `GET /jobs/{id}/audit`) with per-user API keys and a repository allowlist.
 - Postgres job queue worker (`coding-agent worker`, or embedded in the API) with heartbeats,
