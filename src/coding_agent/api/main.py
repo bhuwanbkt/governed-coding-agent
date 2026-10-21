@@ -17,10 +17,13 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from coding_agent.api.jobs import router as jobs_router
+from coding_agent.api.metrics import router as metrics_router
 from coding_agent.api.middleware import RequestContextMiddleware
 from coding_agent.config import get_settings
 from coding_agent.db.session import DatabaseNotConfiguredError, ping
 from coding_agent.observability.logging import configure_logging
+from coding_agent.observability.tracing import configure as configure_tracing
+from coding_agent.observability.tracing import tracer
 from coding_agent.web.oidc import OIDCClient, OIDCConfig
 from coding_agent.web.routes import router as web_router
 from coding_agent.web.security import SecurityHeadersMiddleware
@@ -34,6 +37,7 @@ logger = logging.getLogger(__name__)
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
+    configure_tracing(settings)
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -50,6 +54,7 @@ def create_app() -> FastAPI:
             stop.set()
             with contextlib.suppress(TimeoutError, asyncio.CancelledError):
                 await asyncio.wait_for(worker_task, timeout=25)
+        await asyncio.to_thread(tracer().flush)  # send buffered spans before the process exits
 
     app = FastAPI(
         title="Governed Coding Agent",
@@ -75,6 +80,7 @@ def create_app() -> FastAPI:
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestContextMiddleware)
     app.include_router(jobs_router)
+    app.include_router(metrics_router)
     app.include_router(web_router)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.state.oidc = None

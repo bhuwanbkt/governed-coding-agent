@@ -221,8 +221,32 @@ Troubleshooting:
   again.
 - **"issuer does not match":** remove the trailing slash from `OIDC_ISSUER`.
 
+## 11. Phase 6: tracing and ops metrics
+
+### Langfuse (about 5 minutes)
+
+1. Create a Langfuse Cloud account (free Hobby plan) and a project, e.g. `governed-coding-agent`.
+2. Project settings → **API keys** → create one key per environment (e.g. `prod`, `local-dev`).
+   The secret is shown once.
+3. Set these in `.env` locally and as Northflank secrets:
+
+| Variable | Value |
+|---|---|
+| `LANGFUSE_PUBLIC_KEY` | `pk-lf-…` |
+| `LANGFUSE_SECRET_KEY` | `sk-lf-…` |
+| `LANGFUSE_BASE_URL` | `https://us.cloud.langfuse.com` (US) or `https://cloud.langfuse.com` (EU). `LANGFUSE_HOST` also works |
+
+Check: `uv run coding-agent trace-check` sends one test trace and prints its link.
+Run a job; its page shows **Trace in Langfuse**.
+
+### Ops page and metrics
+
+- `/ui/ops` works for anyone with the `approver` role; nothing to configure.
+- `/metrics` (Prometheus format) is off by default. To enable it, add a user to `API_KEYS` for
+  the scraper (e.g. `metrics:<key>`) and set `METRICS_READERS=metrics`.
+
 ## Coming in later phases
 
 | Phase | Setup needed |
 |---|---|
-| 6 | Langfuse project keys, optional Cerebras / Anthropic keys |
+| 6b | `GROQ_API_KEY` as a GitHub secret for the on-demand live eval workflow |

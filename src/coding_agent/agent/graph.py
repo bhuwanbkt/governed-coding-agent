@@ -53,6 +53,7 @@ from coding_agent.governance.policy import Policy
 from coding_agent.governance.pricing import cost_usd
 from coding_agent.governance.redact import find_secrets
 from coding_agent.governance.risk import assess
+from coding_agent.observability.tracing import tracer
 from coding_agent.prompts import PromptRegistry
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,7 @@ class AgentDeps:
     prompts: PromptRegistry
     limits: AgentLimits
     provider: str | None = None
+    model_name: str = ""  # for traces
     policy: Policy | None = None
     meter: UsageMeter = field(default_factory=lambda: UsageMeter())
 
@@ -209,7 +211,9 @@ def build_graph(deps: AgentDeps) -> Any:
         return meter.as_state()
 
     # ------------------------------------------------------------------ LLM plumbing
-    async def llm(model: ToolCallingModel, messages: list[BaseMessage]) -> BaseMessage:
+    async def llm(
+        model: ToolCallingModel, messages: list[BaseMessage], *, role: str = "agent", prompt_ref: str = ""
+    ) -> BaseMessage:
         nonlocal last_call
         if meter.calls >= limits.max_llm_calls:
             raise BudgetExhaustedError(f"LLM call budget exhausted ({limits.max_llm_calls} calls)")
@@ -222,10 +226,28 @@ def build_graph(deps: AgentDeps) -> Any:
             await asyncio.sleep(wait)
         last_call = time.monotonic()
         meter.calls += 1
-        response = await model.ainvoke(messages)
-        metadata = getattr(response, "usage_metadata", None) or {}
-        meter.tokens_in += int(metadata.get("input_tokens", 0) or 0)
-        meter.tokens_out += int(metadata.get("output_tokens", 0) or 0)
+        with tracer().observe(
+            f"{role}.llm",
+            as_type="generation",
+            input=_trace_messages(messages),
+            metadata={"prompt": prompt_ref, "call": meter.calls},
+            model=deps.model_name or None,
+        ) as generation:
+            try:
+                response = await model.ainvoke(messages)
+            except Exception as exc:
+                generation.update(level="ERROR", status_message=f"{type(exc).__name__}: {exc}"[:500])
+                raise
+            metadata = getattr(response, "usage_metadata", None) or {}
+            tokens_in = int(metadata.get("input_tokens", 0) or 0)
+            tokens_out = int(metadata.get("output_tokens", 0) or 0)
+            meter.tokens_in += tokens_in
+            meter.tokens_out += tokens_out
+            generation.update(
+                output=_trace_reply(response),
+                usage_details={"input": tokens_in, "output": tokens_out},
+                cost_details={"total": cost_usd(tokens_in, tokens_out, limits.prices_per_mtok)},
+            )
         return response
 
     async def run_agent(role: Role, variables: dict[str, Any], kickoff: str) -> AgentRun:
@@ -245,7 +267,7 @@ def build_graph(deps: AgentDeps) -> Any:
         rate_limit_waits = 0
         for _ in range(max_turns):
             try:
-                response = await llm(model, messages)
+                response = await llm(model, messages, role=role.name, prompt_ref=prompt.ref)
             except BudgetExhaustedError:
                 raise
             except Exception as exc:
@@ -630,6 +652,17 @@ def build_graph(deps: AgentDeps) -> Any:
     def by_next_step(state: AgentState) -> str:
         return state["next_step"]
 
+    def traced(name: str, node: Any) -> Any:
+        """One span per graph step; its output is the step's small, scalar results."""
+
+        async def run(state: AgentState) -> dict[str, Any]:
+            with tracer().observe(f"node.{name}", as_type=_NODE_TYPES.get(name, "chain")) as span:
+                result: dict[str, Any] = await node(state)
+                span.update(output=_trace_step(result))
+                return result
+
+        return run
+
     graph = StateGraph(AgentState)
     for name, node in {
         "prepare": prepare,
@@ -643,7 +676,7 @@ def build_graph(deps: AgentDeps) -> Any:
         "package": package,
         "hand_off": hand_off,
     }.items():
-        graph.add_node(name, node)
+        graph.add_node(name, traced(name, node))
     graph.add_edge(START, "prepare")
     graph.add_conditional_edges("prepare", after_prepare, {"index": "index", "end": END})
     graph.add_edge("index", "plan")
@@ -660,6 +693,46 @@ def build_graph(deps: AgentDeps) -> Any:
     graph.add_edge("package", END)
     graph.add_edge("hand_off", END)
     return graph.compile()
+
+
+_NODE_TYPES = {"plan": "agent", "code": "agent", "review": "agent", "index": "retriever"}
+_STEP_KEYS = (
+    "status",
+    "next_step",
+    "test_exit_code",
+    "risk_level",
+    "error",
+    "halt",
+    "round",
+    "coder_summary",
+)
+
+
+def _trace_messages(messages: list[BaseMessage]) -> list[dict[str, Any]]:
+    """Chat history in a compact form for the trace (masking and size limits apply later)."""
+    out: list[dict[str, Any]] = []
+    for message in messages:
+        item: dict[str, Any] = {"role": message.type, "content": message_text(message)}
+        if isinstance(message, AIMessage) and message.tool_calls:
+            item["tool_calls"] = [{"name": c["name"], "args": c["args"]} for c in message.tool_calls]
+        out.append(item)
+    return out
+
+
+def _trace_reply(message: BaseMessage) -> dict[str, Any]:
+    reply: dict[str, Any] = {"content": message_text(message)}
+    if isinstance(message, AIMessage) and message.tool_calls:
+        reply["tool_calls"] = [{"name": c["name"], "args": c["args"]} for c in message.tool_calls]
+    return reply
+
+
+def _trace_step(result: dict[str, Any]) -> dict[str, Any]:
+    step = {k: result[k] for k in _STEP_KEYS if result.get(k) not in (None, "")}
+    if isinstance(result.get("plan"), dict):
+        step["plan"] = result["plan"].get("summary")
+    if isinstance(result.get("review"), dict):
+        step["review"] = result["review"].get("verdict")
+    return step
 
 
 def _brief(output: BaseModel) -> str:

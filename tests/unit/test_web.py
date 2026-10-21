@@ -19,6 +19,8 @@ from fastapi.testclient import TestClient
 from coding_agent.api.main import create_app
 from coding_agent.config import get_settings
 from coding_agent.db import jobs as repo
+from coding_agent.db import ops
+from coding_agent.observability import tracing
 from coding_agent.web.oidc import Identity, LoginRequest, OIDCError
 
 SHA = "c" * 64
@@ -377,3 +379,62 @@ def test_timeline_fragment_stops_polling_when_job_is_done(
 def test_unknown_job_is_404(client: TestClient, app: FastAPI) -> None:
     sign_in(client, app, "submitter")
     assert client.get(f"/ui/jobs/{uuid.uuid4()}").status_code == 404
+
+
+# --------------------------------------------------------------------------- ops page & trace link
+def fake_snapshot(days: int, *, daily_budget_usd: float) -> ops.Snapshot:
+    snap = ops.Snapshot(
+        days=days,
+        by_status={"succeeded": 3, "handed_off": 1},
+        finished=4,
+        duration_p50_s=95.0,
+        duration_p95_s=700.0,
+        within_duration_slo=3,
+        queue_wait_p50_s=2.0,
+        queue_wait_p95_s=4.0,
+        approval_wait_p50_s=None,
+        approval_wait_p95_s=None,
+        approvals=0,
+        avg_cost_usd=0.004,
+        avg_llm_calls=15.0,
+        cost_by_day=[(NOW.date(), 0.012, 4)],
+        hand_off_reasons=[("<b>Tests still failing</b>", 1)],
+        queued_now=0,
+        running_now=0,
+        awaiting_now=1,
+        spend_today_usd=0.012,
+        daily_budget_usd=daily_budget_usd,
+    )
+    return replace(snap, slos=ops.evaluate_slos(snap))
+
+
+def test_ops_page_is_for_approvers(client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ops, "snapshot", fake_snapshot)
+    sign_in(client, app, "submitter")
+    assert "/ui/ops" not in client.get("/ui").text
+    assert client.get("/ui/ops").status_code == 403
+
+    sign_in(client, app, "approver", name="reviewer")
+    assert 'href="/ui/ops"' in client.get("/ui").text
+    page = client.get("/ui/ops", params={"days": 30})
+    assert page.status_code == 200
+    assert "Service level objectives" in page.text and "last 30 day(s)" in page.text
+    assert "missed" in page.text  # 3 of 4 runs within 10 min < 95%
+    assert "&lt;b&gt;Tests still failing&lt;/b&gt;" in page.text
+    assert "11.7 min" in page.text  # p95 duration formatted
+    assert "style=" not in page.text  # CSP: bar widths are set by app.js
+
+
+def test_job_page_links_to_its_trace(client: TestClient, app: FastAPI) -> None:
+    class LinkingTracer(tracing.Tracer):
+        def trace_url(self, job_id: str) -> str | None:
+            return f"https://lf.example.test/project/p/traces/{job_id}"
+
+    previous = tracing.set_tracer(LinkingTracer())
+    try:
+        sign_in(client, app, "submitter")
+        page = client.get(f"/ui/jobs/{BASE_JOB.id}").text
+    finally:
+        tracing.set_tracer(previous)
+    assert f"https://lf.example.test/project/p/traces/{BASE_JOB.id}" in page
+    assert "Trace in Langfuse" in page

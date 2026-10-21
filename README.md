@@ -174,6 +174,7 @@ Open `/ui` and sign in with Zitadel (setup: [docs/setup.md §10](docs/setup.md))
 | Routing | An LLM may propose the next step; code decides ([ADR 0008](docs/adr/0008-deterministic-supervisor.md)) |
 | Sign-in & roles | OIDC (Zitadel) with PKCE, nonce and JWKS-verified ID tokens; `submitter`/`approver` roles; CSRF tokens; strict CSP |
 | Human approval | Bound to the patch SHA; **approvers list**, **expiry**, **risk level**; requester can't approve (database trigger) |
+| Observability | One Langfuse trace per job (steps, LLM calls with tokens and cost, tool calls), redacted before export; ops page with SLOs; `/metrics` ([ADR 0013](docs/adr/0013-tracing-and-ops-metrics.md)) |
 | Audit | Append-only `audit_log` (UPDATE/DELETE/TRUNCATE blocked by triggers), with policy version on every block |
 
 ## Project layout
@@ -187,9 +188,9 @@ src/coding_agent/
   api/            FastAPI app: job routes, API-key auth, middleware
   web/            UI: OIDC sign-in, session + CSRF, security headers, Jinja2 templates, static
   worker/         Postgres queue worker: claim, heartbeat, recover, code, publish
-  db/             engine, job queue and audit data access
+  db/             engine, job queue, audit data access, ops metrics and SLOs
   governance/     policy file + checks, redaction, injection detection, pricing, risk, GitHub App
-  observability/  structured logging (tracing/metrics later)
+  observability/  structured logging, Langfuse tracing
   cli.py          `coding-agent` command
   config.py       typed settings from env vars
 evals/sample_repo/  practice repository the agent edits in demos and evals
@@ -206,7 +207,7 @@ docs/             architecture, ADRs, runbook, setup
 - [x] **3 Multi-agent + retrieval** — planner, coder, tester, reviewer; guarded supervisor; LlamaIndex
 - [x] **4 Governance** — GitHub App, policy file, budgets, masking, injection tripwires, approvals
 - [x] **5 UI + login** — Zitadel OIDC sign-in, roles, job timeline, approval screen
-- [ ] **6 Evals + observability** — golden tasks, retrieval evals, Langfuse, SLOs
+- [ ] **6 Evals + observability** — Langfuse tracing, ops page and SLOs (6a, done); golden tasks and retrieval evals (6b)
 - [ ] **7 Release** — docs, demo video, `v1.0.0`
 
 ## Documentation

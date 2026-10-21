@@ -10,7 +10,10 @@
   </div>
   <h1>{{ job.task }}</h1>
   <p class="muted">{{ job.repo_url }} · base <code>{{ job.base_branch }}</code>{% if job.work_branch %} · branch <code>{{ job.work_branch }}</code>{% endif %}</p>
-  {% if job.pr_url %}<p><a class="button" href="{{ job.pr_url }}" rel="noopener noreferrer">Open pull request</a></p>{% endif %}
+  {% if job.pr_url or trace_url %}<p class="row">
+    {% if job.pr_url %}<a class="button" href="{{ job.pr_url }}" rel="noopener noreferrer">Open pull request</a>{% endif %}
+    {% if trace_url %}<a class="button secondary" href="{{ trace_url }}" rel="noopener noreferrer" target="_blank">Trace in Langfuse</a>{% endif %}
+  </p>{% endif %}
   {% if job.error %}<p class="alert bad">{{ job.error }}</p>{% endif %}
   {% if error %}<p class="alert bad" role="alert">{{ error }}</p>{% endif %}
   <dl class="stats">
