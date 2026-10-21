@@ -375,3 +375,41 @@ def test_llm_supervisor_can_ask_for_a_replan(tmp_path: Path, sample_remote: str)
     assert state["replans"] == 1
     assert [r.split("@")[0] for r in state["prompt_refs"]].count("planner") == 2
     assert state["status"] == "handed_off"
+
+
+# --------------------------------------------------------------------------- model errors
+class FlakyModel:
+    """Fails the way Groq does when the model emits a malformed tool call, then behaves."""
+
+    def __init__(self, inner: ScriptedChatModel, failures: int) -> None:
+        self.inner, self.failures = inner, failures
+
+    async def ainvoke(self, input: list[Any], /) -> Any:
+        if self.failures:
+            self.failures -= 1
+            raise RuntimeError("Error code: 400 - {'error': {'code': 'tool_use_failed'}}")
+        return await self.inner.ainvoke(input)
+
+
+def test_model_error_is_retried_with_guidance(tmp_path: Path, sample_remote: str) -> None:
+    """Regression (found in production): a provider 400 during the coder's turn crashed the job
+    with an unreadable ExceptionGroup."""
+    coder = demo_coder()
+    models = ScriptedModels()
+    models.scripts["coder"] = FlakyModel(coder, failures=1)  # type: ignore[assignment]
+    state = run(tmp_path, sample_remote, models)
+
+    assert state["status"] == "awaiting_approval", state.get("error")
+    first_retry = coder.received[0]
+    assert "could not be processed" in str(first_retry[-1].content)
+
+
+def test_model_that_keeps_failing_hands_off_with_a_clear_reason(tmp_path: Path, sample_remote: str) -> None:
+    models = ScriptedModels()
+    models.scripts["coder"] = FlakyModel(demo_coder(), failures=99)  # type: ignore[assignment]
+    state = run(tmp_path, sample_remote, models)
+
+    assert state["status"] == "handed_off"
+    assert "coder: the model failed 3 times in a row" in str(state["error"])
+    assert "tool_use_failed" in str(state["error"])
+    assert "ExceptionGroup" not in str(state["error"])

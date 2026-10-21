@@ -19,7 +19,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from coding_agent.agent.graph import AgentDeps, AgentLimits, AgentState, UsageMeter, build_graph
+from coding_agent.agent.graph import (
+    AgentDeps,
+    AgentLimits,
+    AgentLLMError,
+    AgentState,
+    UsageMeter,
+    build_graph,
+)
 from coding_agent.agent.llm import ModelProvider, build_models
 from coding_agent.agent.publish import PublishRequest, PublishResult, publish
 from coding_agent.agent.toolbox import AuditSink, InjectionSuspectedError, LoopDetectedError, Toolbox
@@ -56,6 +63,13 @@ def normalize_repo_url(repo_url: str) -> str:
         if local.exists():
             return local.resolve().as_uri()
     return repo_url
+
+
+def describe(exc: BaseException) -> str:
+    """Readable error: the real cause, not "ExceptionGroup: unhandled errors in a TaskGroup"."""
+    while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
+        exc = exc.exceptions[0]
+    return " ".join(f"{type(exc).__name__}: {exc}".split())[:500]
 
 
 def _policy(settings: Settings) -> Policy:
@@ -192,7 +206,7 @@ async def run_coding_job(
             try:
                 async with asyncio.timeout(settings.job_timeout_seconds):
                     final = await graph.ainvoke(initial, config={"recursion_limit": 100})
-            except (LoopDetectedError, InjectionSuspectedError) as exc:
+            except (LoopDetectedError, InjectionSuspectedError, AgentLLMError) as exc:
                 final = {**initial, "status": "handed_off", "error": str(exc)}
             except TimeoutError:
                 final = {
@@ -200,12 +214,15 @@ async def run_coding_job(
                     "status": "handed_off",
                     "error": f"Time limit reached ({settings.job_timeout_seconds} s); needs a human.",
                 }
+            except Exception as exc:  # handled here, before the MCP task group wraps it
+                logger.exception("coding step crashed")
+                final = {**initial, "status": "failed", "error": describe(exc)}
             if toolbox.injection_flags:
                 findings = [{"kind": "injection", "detail": f} for f in toolbox.injection_flags[:20]]
                 final.setdefault("policy_findings", findings)
     except Exception as exc:
         logger.exception("coding crashed")
-        final = {**initial, "status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+        final = {**initial, "status": "failed", "error": describe(exc)}
     finally:
         _cleanup(settings, workspace)
         job_id_var.reset(token)
@@ -237,10 +254,10 @@ async def run_publish_job(
                 result = await publish(toolbox, request)
             except Exception as exc:
                 logger.exception("publish step crashed")
-                result = PublishResult(status="failed", error=f"{type(exc).__name__}: {exc}")
+                result = PublishResult(status="failed", error=describe(exc))
     except Exception as exc:
         logger.exception("publish crashed")
-        result = PublishResult(status="failed", error=f"{type(exc).__name__}: {exc}")
+        result = PublishResult(status="failed", error=describe(exc))
     finally:
         _cleanup(settings, workspace)
         job_id_var.reset(token)

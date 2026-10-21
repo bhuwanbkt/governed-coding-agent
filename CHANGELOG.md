@@ -6,6 +6,9 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A provider error during an agent's turn (e.g. Groq rejecting a malformed tool call) no longer
+  crashes the job: the agent is told and retries up to twice, then the job is handed off with
+  the reason. Errors now show their real cause instead of "ExceptionGroup" (job `c3059191`).
 - Loop detection no longer stops a coder that re-reads a file after editing it: identical calls
   are only counted while the workspace is unchanged (found in production, job `32e1226e`).
 - Jobs that stop early (loop detected, time limit) now keep their LLM call, token and cost totals.

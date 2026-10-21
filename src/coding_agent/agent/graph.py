@@ -155,6 +155,13 @@ class UsageMeter:
         }
 
 
+MAX_CONSECUTIVE_LLM_ERRORS = 2  # retries after a model error before giving up
+
+
+class AgentLLMError(RuntimeError):
+    """The model kept failing (e.g. the provider rejected malformed tool calls)."""
+
+
 class BudgetExhaustedError(RuntimeError):
     pass
 
@@ -227,8 +234,31 @@ def build_graph(deps: AgentDeps) -> Any:
         messages: list[BaseMessage] = [SystemMessage(prompt.content), HumanMessage(kickoff)]
         text = ""
         nudged = False
+        llm_errors = 0
         for _ in range(max_turns):
-            response = await llm(model, messages)
+            try:
+                response = await llm(model, messages)
+            except BudgetExhaustedError:
+                raise
+            except Exception as exc:  # provider errors, e.g. a 400 "tool call validation failed"
+                llm_errors += 1
+                reason = " ".join(f"{type(exc).__name__}: {exc}".split())[:300]
+                await toolbox.record(
+                    role.name, "system", f"model error {llm_errors}: {reason}", allowed=False
+                )
+                if llm_errors > MAX_CONSECUTIVE_LLM_ERRORS:
+                    raise AgentLLMError(
+                        f"{role.name}: the model failed {llm_errors} times in a row ({reason})"
+                    ) from exc
+                messages.append(
+                    HumanMessage(
+                        "Your previous reply could not be processed (the provider rejected it). "
+                        "Make sure every tool call uses only the tool's parameters with valid JSON "
+                        "values, then continue."
+                    )
+                )
+                continue
+            llm_errors = 0
             messages.append(response)
             tool_calls = response.tool_calls if isinstance(response, AIMessage) else []
             if not tool_calls:
@@ -620,6 +650,7 @@ def _brief(output: BaseModel) -> str:
 __all__ = [
     "TRANSITIONS",
     "AgentDeps",
+    "AgentLLMError",
     "AgentLimits",
     "AgentState",
     "BudgetExhaustedError",

@@ -42,3 +42,11 @@ def test_scripted_model_replays_then_finishes() -> None:
 def test_message_text_handles_content_blocks() -> None:
     message = AIMessage(content=[{"type": "text", "text": "a"}, "b", {"type": "image_url", "image_url": {}}])
     assert message_text(message) == "ab"
+
+
+def test_errors_are_reported_by_their_real_cause() -> None:
+    from coding_agent.agent.runner import describe
+
+    wrapped = ExceptionGroup("unhandled errors in a TaskGroup", [ValueError("the real problem")])
+    assert describe(wrapped) == "ValueError: the real problem"
+    assert describe(KeyError("x")) == "KeyError: 'x'"
