@@ -1,5 +1,7 @@
 """API-key authentication. Each key maps to a named user (API_KEYS="alice:<key>,bob:<key>"),
-so every job and approval is attributed to a person. GitHub login replaces this in phase 5."""
+so every job and approval is attributed to a person. This guards the JSON API only (scripts, CI,
+evals); people use the web UI, which signs in with OIDC (ADR 0012). Without API_KEYS the JSON API
+refuses every request."""
 
 from __future__ import annotations
 

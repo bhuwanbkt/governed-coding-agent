@@ -7,11 +7,12 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints
 
 from coding_agent.api.auth import CurrentUser
 from coding_agent.config import get_settings
 from coding_agent.db import jobs as repo
+from coding_agent.governance.repos import repo_url_problem
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -20,8 +21,22 @@ Branch = Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^[A-Z
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
 
+def _check_repo_url(value: str) -> str:
+    problem = repo_url_problem(value)
+    if problem:
+        raise ValueError(problem)
+    return value
+
+
+RepoUrl = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=8, max_length=500),
+    AfterValidator(_check_repo_url),
+]
+
+
 class JobCreate(BaseModel):
-    repo_url: Annotated[str, StringConstraints(strip_whitespace=True, min_length=8, max_length=500)]
+    repo_url: RepoUrl
     task: Task
     base_branch: Branch = "main"
     test_command: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] = "pytest -q"
