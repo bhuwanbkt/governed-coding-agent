@@ -118,6 +118,7 @@ class AgentLimits:
     max_review_rounds: int = 1
     max_replans: int = 1
     min_llm_interval_seconds: float = 0.0  # pacing for rate-limited providers
+    rate_limit_backoff_seconds: float = 20.0  # first wait after the provider still says 429
     supervisor_mode: SupervisorMode = "deterministic"
 
 
@@ -153,6 +154,19 @@ class UsageMeter:
             "tokens_out": self.tokens_out,
             "cost_usd": round(self.cost_usd, 6),
         }
+
+
+MAX_CONSECUTIVE_LLM_ERRORS = 2  # retries after a rejected reply before giving up
+MAX_RATE_LIMIT_WAITS = 3  # extra waits after the client's own retries are used up
+
+
+def is_rate_limit(exc: BaseException) -> bool:
+    """Provider said "too many requests" (HTTP 429), whatever SDK raised it."""
+    return getattr(exc, "status_code", None) == 429 or "RateLimit" in type(exc).__name__
+
+
+class AgentLLMError(RuntimeError):
+    """The model kept failing (e.g. the provider rejected malformed tool calls)."""
 
 
 class BudgetExhaustedError(RuntimeError):
@@ -227,8 +241,47 @@ def build_graph(deps: AgentDeps) -> Any:
         messages: list[BaseMessage] = [SystemMessage(prompt.content), HumanMessage(kickoff)]
         text = ""
         nudged = False
+        llm_errors = 0
+        rate_limit_waits = 0
         for _ in range(max_turns):
-            response = await llm(model, messages)
+            try:
+                response = await llm(model, messages)
+            except BudgetExhaustedError:
+                raise
+            except Exception as exc:
+                reason = " ".join(f"{type(exc).__name__}: {exc}".split())[:300]
+                if is_rate_limit(exc):
+                    # Free tiers cap tokens per minute: wait and resend the same request.
+                    rate_limit_waits += 1
+                    await toolbox.record(
+                        role.name, "system", f"rate limited ({rate_limit_waits}): {reason}", allowed=False
+                    )
+                    if rate_limit_waits > MAX_RATE_LIMIT_WAITS:
+                        raise AgentLLMError(
+                            f"{role.name}: the LLM provider kept rate-limiting the job ({reason})"
+                        ) from exc
+                    await asyncio.sleep(limits.rate_limit_backoff_seconds * rate_limit_waits)
+                    continue
+                # Otherwise the provider rejected the reply, e.g. a 400 "tool call validation
+                # failed" for a malformed tool call: tell the agent and let it try again.
+                llm_errors += 1
+                await toolbox.record(
+                    role.name, "system", f"model error {llm_errors}: {reason}", allowed=False
+                )
+                if llm_errors > MAX_CONSECUTIVE_LLM_ERRORS:
+                    raise AgentLLMError(
+                        f"{role.name}: the model failed {llm_errors} times in a row ({reason})"
+                    ) from exc
+                messages.append(
+                    HumanMessage(
+                        "Your previous reply could not be processed (the provider rejected it). "
+                        "Make sure every tool call uses only the tool's parameters with valid JSON "
+                        "values, then continue."
+                    )
+                )
+                continue
+            rate_limit_waits = 0
+            llm_errors = 0
             messages.append(response)
             tool_calls = response.tool_calls if isinstance(response, AIMessage) else []
             if not tool_calls:
@@ -620,6 +673,7 @@ def _brief(output: BaseModel) -> str:
 __all__ = [
     "TRANSITIONS",
     "AgentDeps",
+    "AgentLLMError",
     "AgentLimits",
     "AgentState",
     "BudgetExhaustedError",
