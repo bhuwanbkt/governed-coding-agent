@@ -44,7 +44,10 @@ class Settings(BaseSettings):
     groq_api_key: SecretStr | None = None
 
     # --- agent -----------------------------------------------------------------------
-    github_token: SecretStr | None = None  # fine-grained PAT for phase 1; GitHub App from phase 4
+    github_token: SecretStr | None = None  # fine-grained PAT: fallback when no GitHub App is set
+    # GitHub App (phase 4): per-job, one-repository, one-hour tokens. Both or neither.
+    github_app_id: str | None = None
+    github_app_private_key: SecretStr | None = None  # PEM; "\n" escapes are accepted
     workspaces_dir: Path = Path("workspaces")
     allowed_test_commands: str = "pytest,python -m pytest"
     agent_max_fix_attempts: int = 2  # retries after the first attempt fails its tests
@@ -63,6 +66,17 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-small-en-v1.5"  # runs locally via fastembed, no API key
     embedding_cache_dir: Path | None = None  # where the embedding model is downloaded/cached
     retrieval_top_k: int = 6
+
+    # --- governance (phase 4) -----------------------------------------------------------
+    policy_file: Path | None = None  # default: the packaged governance/policies/default.yaml
+    job_timeout_seconds: int = 1200  # coding run wall-clock limit; then handed to a human
+    max_cost_per_job_usd: float = 0.50  # list-price LLM cost per job
+    daily_budget_usd: float = 5.00  # all jobs per UTC day; new jobs wait when reached
+    llm_price_input_per_mtok: float | None = None  # override the built-in price table
+    llm_price_output_per_mtok: float | None = None
+    # "bob,carol": only these users may approve. Empty = anyone except the requester.
+    approvers: str = ""
+    approval_ttl_hours: float = 24.0  # unanswered approvals expire after this
     git_author_name: str = "governed-coding-agent"
     git_author_email: str = "agent@users.noreply.github.com"
 
@@ -79,7 +93,15 @@ class Settings(BaseSettings):
     worker_stale_after_seconds: int = 300
     worker_max_claims: int = 3  # a job interrupted this many times is marked failed
 
-    @field_validator("database_url", "groq_api_key", "github_token", "api_keys", mode="before")
+    @field_validator(
+        "database_url",
+        "groq_api_key",
+        "github_token",
+        "api_keys",
+        "github_app_id",
+        "github_app_private_key",
+        mode="before",
+    )
     @classmethod
     def _blank_is_none(cls, value: object) -> object:
         if isinstance(value, str):
@@ -102,7 +124,25 @@ class Settings(BaseSettings):
             if not self.repo_prefixes():
                 raise ValueError("ALLOWED_REPO_PREFIXES is required when APP_ENV=production")
         self.api_users()  # fail fast on a malformed API_KEYS value
+        if (self.github_app_id is None) != (self.github_app_private_key is None):
+            raise ValueError("set both GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY, or neither")
+        if self.max_cost_per_job_usd <= 0 or self.daily_budget_usd <= 0 or self.job_timeout_seconds <= 0:
+            raise ValueError("budgets and the job timeout must be positive")
         return self
+
+    def app_private_key(self) -> str | None:
+        """The App's PEM key, with literal "\\n" sequences (common in env vars) turned into newlines."""
+        if self.github_app_private_key is None:
+            return None
+        return self.github_app_private_key.get_secret_value().replace("\\n", "\n")
+
+    def approver_set(self) -> frozenset[str]:
+        return frozenset(a.strip() for a in self.approvers.split(",") if a.strip())
+
+    def llm_prices(self) -> tuple[float, float]:
+        from coding_agent.governance.pricing import price_for
+
+        return price_for(self.llm_model, (self.llm_price_input_per_mtok, self.llm_price_output_per_mtok))
 
     def api_users(self) -> dict[str, str]:
         """Map API key -> user name, parsed from API_KEYS ("user:key,user:key")."""

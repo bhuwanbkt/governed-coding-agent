@@ -2,6 +2,10 @@
 
 Agents never talk to the MCP session directly. They go through `Toolbox.call`, which:
 - rejects tools outside the calling agent's allowlist (least privilege)
+- applies the governance policy to the arguments (protected paths, test commands)
+- scans what agents read for prompt injection; a blocked action after suspicious content stops
+  the job for a human
+- masks secrets and personal data in everything it records
 - stops a run that repeats the identical call too often (loop detection)
 - writes one structured audit log line per call (persisted to Postgres from phase 2)
 """
@@ -22,6 +26,10 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from coding_agent.governance import injection
+from coding_agent.governance.policy import Policy
+from coding_agent.governance.redact import redact, redact_value
+
 logger = logging.getLogger("coding_agent.audit")
 
 MAX_IDENTICAL_CALLS = 3
@@ -38,8 +46,16 @@ class ToolNotAllowedError(PermissionError):
     pass
 
 
+class PolicyViolationError(ToolNotAllowedError):
+    """The tool is allowed for this agent, but these arguments break the governance policy."""
+
+
 class LoopDetectedError(RuntimeError):
     pass
+
+
+class InjectionSuspectedError(RuntimeError):
+    """An agent tried a blocked action after reading instruction-like content: stop for a human."""
 
 
 @dataclass(frozen=True)
@@ -62,6 +78,8 @@ class Toolbox:
     specs: dict[str, ToolSpec]
     job_id: str = "local"
     audit_sink: AuditSink | None = None  # e.g. writes to the audit_log table (phase 2)
+    policy: Policy | None = None  # governance policy applied to arguments (phase 4)
+    injection_flags: list[str] = field(default_factory=list)
     _call_counts: Counter[str] = field(default_factory=Counter)
 
     @classmethod
@@ -75,6 +93,7 @@ class Toolbox:
         audit_sink: AuditSink | None = None,
         servers: Sequence[str] = ("workspace",),
         server_env: Mapping[str, Mapping[str, str]] | None = None,
+        policy: Policy | None = None,
     ) -> AsyncIterator[Toolbox]:
         """Start the named MCP servers as subprocesses and open a session to each.
         `server_env` replaces `env` for the servers it names (least privilege: e.g. the code
@@ -98,7 +117,7 @@ class Toolbox:
                         tool.name, tool.description or "", dict(tool.input_schema or {})
                     )
                     sessions[tool.name] = session
-            yield cls(sessions=sessions, specs=specs, job_id=job_id, audit_sink=audit_sink)
+            yield cls(sessions=sessions, specs=specs, job_id=job_id, audit_sink=audit_sink, policy=policy)
 
     def schemas(self, allowed: Collection[str]) -> list[dict[str, Any]]:
         return [self.specs[name].to_openai() for name in allowed if name in self.specs]
@@ -110,7 +129,20 @@ class Toolbox:
             await self._audit(
                 actor, name, args, allowed=False, result="blocked: not in allowlist", start=start
             )
+            self._stop_if_injected(actor, f"{name} is not in its allowlist")
             raise ToolNotAllowedError(f"{actor} is not allowed to call {name!r}")
+        violation = self.policy.check_tool_call(name, dict(args)) if self.policy else None
+        if violation is not None and self.policy is not None:
+            await self._audit(
+                actor,
+                name,
+                args,
+                allowed=False,
+                result=f"blocked by {self.policy.ref}: {violation}",
+                start=start,
+            )
+            self._stop_if_injected(actor, str(violation))
+            raise PolicyViolationError(f"blocked by policy: {violation}")
 
         fingerprint = f"{actor}:{name}:{json.dumps(args, sort_keys=True, default=str)}"
         self._call_counts[fingerprint] += 1
@@ -123,7 +155,23 @@ class Toolbox:
         if getattr(result, "is_error", False):
             text = f"ERROR: {text}"
         await self._audit(actor, name, args, allowed=True, result=text, start=start)
+        if name in injection.SCANNED_TOOLS and (hits := injection.detect(text)):
+            where = f"{name}({args.get('path') or args.get('query') or args.get('pattern') or ''})"
+            self.injection_flags.extend(f"{where}: {hit}" for hit in hits)
+            await self.record(
+                actor,
+                "system",
+                f"suspected prompt injection in {where}: {'; '.join(hits[:3])}",
+                allowed=False,
+            )
         return text
+
+    def _stop_if_injected(self, actor: str, blocked: str) -> None:
+        if self.injection_flags:
+            raise InjectionSuspectedError(
+                f"{actor} attempted a blocked action ({blocked}) after reading suspicious content "
+                f"({self.injection_flags[0]}); stopped for human review"
+            )
 
     async def record(self, actor: str, event_type: str, summary: str, *, allowed: bool = True) -> None:
         """Audit a decision that isn't a tool call, e.g. a routing decision or a submitted plan."""
@@ -134,7 +182,7 @@ class Toolbox:
             "tool": None,
             "allowed": allowed,
             "args_masked": None,
-            "result_summary": summary[:300],
+            "result_summary": redact(summary)[:300],
             "duration_ms": None,
         }
         logger.info(event_type, extra=event)
@@ -151,7 +199,7 @@ class Toolbox:
             "tool": tool,
             "allowed": allowed,
             "args_masked": _mask_args(args),
-            "result_summary": result[:300],
+            "result_summary": redact(result)[:300],
             "duration_ms": round((time.perf_counter() - start) * 1000, 1),
         }
         logger.info("tool_call", extra=event)
@@ -177,5 +225,5 @@ def _mask_args(args: Mapping[str, Any]) -> dict[str, Any]:
         elif isinstance(value, str) and len(value) > 200:
             masked[key] = f"<{len(value)} chars>"
         else:
-            masked[key] = value
+            masked[key] = redact_value(value)
     return masked

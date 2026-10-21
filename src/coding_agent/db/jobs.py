@@ -17,9 +17,11 @@ from sqlalchemy.exc import DBAPIError
 
 from coding_agent.db.session import get_engine
 
-TERMINAL_STATUSES = frozenset({"succeeded", "failed", "rejected", "handed_off", "no_changes", "cancelled"})
+TERMINAL_STATUSES = frozenset(
+    {"succeeded", "failed", "rejected", "handed_off", "no_changes", "cancelled", "expired"}
+)
 
-_JSON_COLUMNS = frozenset({"prompt_refs", "plan", "review", "routes"})
+_JSON_COLUMNS = frozenset({"prompt_refs", "plan", "review", "routes", "policy_findings"})
 
 # Columns `update_job` may set. Anything else is a programming error.
 _UPDATABLE = frozenset(
@@ -38,6 +40,9 @@ _UPDATABLE = frozenset(
         "review",
         "routes",
         "llm_calls",
+        "risk_level",
+        "policy_findings",
+        "duration_ms",
         "tokens_in",
         "tokens_out",
         "cost_usd",
@@ -59,6 +64,10 @@ class DiffMismatchError(RuntimeError):
 
 
 class SeparationOfDutiesError(PermissionError):
+    pass
+
+
+class NotAnApproverError(PermissionError):
     pass
 
 
@@ -86,6 +95,12 @@ class Job:
     review: dict[str, Any] | None
     routes: list[dict[str, Any]]
     llm_calls: int
+    tokens_in: int
+    tokens_out: int
+    cost_usd: float
+    risk_level: str | None
+    policy_findings: list[dict[str, Any]]
+    duration_ms: int | None
     locked_by: str | None
     heartbeat_at: datetime | None
     created_at: datetime
@@ -101,6 +116,8 @@ class Job:
                 values[column] = json.loads(values[column])
         values["prompt_refs"] = list(values["prompt_refs"] or [])
         values["routes"] = list(values["routes"] or [])
+        values["policy_findings"] = list(values["policy_findings"] or [])
+        values["cost_usd"] = float(values["cost_usd"] or 0)  # NUMERIC arrives as Decimal
         return cls(**values)
 
 
@@ -261,11 +278,53 @@ def recover_stale_jobs(*, stale_after_seconds: int, max_claims: int) -> list[tup
     return [(r[0], r[1]) for r in rows]
 
 
+def expire_stale_approvals(*, ttl_hours: float) -> list[uuid.UUID]:
+    """Close approval requests nobody answered within `ttl_hours`. Their patches can't be published."""
+    with get_engine().begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                UPDATE jobs SET status = 'expired', finished_at = now(), updated_at = now(),
+                    error = 'No decision within the approval window; resubmit the task.'
+                WHERE status = 'awaiting_approval'
+                  AND updated_at < now() - make_interval(secs => CAST(:ttl AS double precision))
+                RETURNING id
+                """
+            ),
+            {"ttl": ttl_hours * 3600},
+        ).all()
+        for (job_id,) in rows:
+            _insert_audit(conn, job_id, actor="expiry", event_type="state_change", result="expired")
+    return [r[0] for r in rows]
+
+
+def spend_today() -> float:
+    """List-price LLM cost of jobs created since midnight UTC."""
+    with get_engine().connect() as conn:
+        value = conn.execute(
+            text(
+                "SELECT COALESCE(SUM(cost_usd), 0) FROM jobs "
+                "WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
+            )
+        ).scalar_one()
+    return float(value)
+
+
 # --------------------------------------------------------------------------- approvals
 def record_decision(
-    job_id: uuid.UUID, *, decided_by: str, approve: bool, diff_sha256: str, comment: str | None
+    job_id: uuid.UUID,
+    *,
+    decided_by: str,
+    approve: bool,
+    diff_sha256: str,
+    comment: str | None,
+    approvers: frozenset[str] = frozenset(),
+    ttl_hours: float | None = None,
 ) -> Job:
-    """Record a human decision on the exact diff that was reviewed (one decision per job)."""
+    """Record a human decision on the exact diff that was reviewed (one decision per job).
+
+    `approvers`: if not empty, only these users may decide. `ttl_hours`: a request older than
+    this can no longer be decided (the expiry sweep will mark it `expired`)."""
     with get_engine().begin() as conn:
         row = (
             conn.execute(text("SELECT * FROM jobs WHERE id = :id FOR UPDATE"), {"id": job_id})
@@ -277,6 +336,14 @@ def record_decision(
         job = Job.from_row(row)
         if job.status != "awaiting_approval":
             raise InvalidJobStateError(f"job is {job.status}, not awaiting_approval")
+        if ttl_hours is not None:
+            age_hours = (datetime.now(job.updated_at.tzinfo) - job.updated_at).total_seconds() / 3600
+            if age_hours > ttl_hours:
+                raise InvalidJobStateError(
+                    f"the approval window closed ({age_hours:.1f} h > {ttl_hours:g} h); resubmit the task"
+                )
+        if approvers and decided_by.lower() not in {a.lower() for a in approvers}:
+            raise NotAnApproverError(f"{decided_by} is not on the approvers list")
         if job.diff_sha256 != diff_sha256:
             raise DiffMismatchError("diff_sha256 does not match the diff awaiting approval")
         if job.requested_by.lower() == decided_by.lower():

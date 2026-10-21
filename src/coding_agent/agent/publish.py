@@ -14,6 +14,7 @@ from coding_agent.agent.graph import tail
 from coding_agent.agent.roles import PUBLISHER_TOOLS
 from coding_agent.agent.schemas import Plan, ReviewVerdict
 from coding_agent.agent.toolbox import Toolbox
+from coding_agent.governance.redact import redact
 
 ACTOR = "publisher"
 
@@ -50,6 +51,10 @@ def _section(title: str, model: type[Plan] | type[ReviewVerdict], data: dict[str
 
 
 def pr_body(request: PublishRequest) -> str:
+    return redact(_pr_body(request))
+
+
+def _pr_body(request: PublishRequest) -> str:
     return (
         f"## Task\n\n{request.task}\n\n"
         + _section("Plan (planner agent)", Plan, request.plan)

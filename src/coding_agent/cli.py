@@ -61,6 +61,8 @@ async def _run_interactive(args: argparse.Namespace) -> int:
         print(f"\n{_RULE}\nResult: {status}")
         if state.get("error"):
             print(f"Details: {state['error']}")
+        for finding in state.get("policy_findings", []):
+            print(f"  - [{finding.get('kind')}] {finding.get('detail')}")
         return 0 if status == "no_changes" else 1
 
     print(f"\n{_RULE}\nAPPROVAL REQUIRED  job {state['job_id']}\n{_RULE}")
@@ -73,7 +75,14 @@ async def _run_interactive(args: argparse.Namespace) -> int:
         print(f"Review (reviewer agent):\n{ReviewVerdict.model_validate(review).as_markdown()}\n")
     elif review:
         print(f"Review (reviewer agent): {review.get('summary')}\n")
-    print(f"LLM calls: {state.get('llm_calls', 0)}\n")
+    print(
+        f"LLM calls: {state.get('llm_calls', 0)}  tokens: {state.get('tokens_in', 0)} in / "
+        f"{state.get('tokens_out', 0)} out  list-price cost: ${state.get('cost_usd', 0.0):.4f}"
+    )
+    print(f"Risk: {state.get('risk_level', 'n/a')}")
+    for finding in state.get("policy_findings", []):
+        print(f"  - [{finding.get('kind')}] {finding.get('detail')}")
+    print()
     print(f"Tests:\n{tail(state.get('test_output', ''), 20)}\n\nDiff:\n{state.get('diff', '')}")
     print(f"Patch SHA-256: {state['diff_sha256']}\n{_RULE}")
     answer = await asyncio.to_thread(

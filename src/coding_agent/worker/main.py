@@ -1,6 +1,7 @@
 """Job worker.
 
-Loop: recover stale jobs -> publish one approved job, else code one queued job -> sleep.
+Loop: recover stale jobs and expire old approvals -> publish one approved job, else code one
+queued job (unless today's LLM budget is spent) -> sleep.
 
 - Claims use `FOR UPDATE SKIP LOCKED`, so several workers can run safely (ADR 0002).
 - While a job runs, a heartbeat updates `heartbeat_at`; if the worker dies, another worker's
@@ -43,6 +44,7 @@ class Worker:
         self.settings = settings
         self.worker_id = worker_id or f"{socket.gethostname()}:{os.getpid()}"
         self._model_factory = model_factory or (lambda: None)  # None -> configured LLM
+        self._budget_warned = False
 
     # ------------------------------------------------------------------ loop
     async def run(self, stop: asyncio.Event) -> None:
@@ -67,6 +69,11 @@ class Worker:
         )
         for job_id, status in recovered:
             logger.warning("recovered stale job", extra={"job_id": str(job_id), "status": status})
+        expired = await asyncio.to_thread(
+            repo.expire_stale_approvals, ttl_hours=self.settings.approval_ttl_hours
+        )
+        for job_id in expired:
+            logger.warning("approval request expired", extra={"job_id": str(job_id)})
 
     async def process_one(self) -> bool:
         """Run at most one unit of work. Finishing approved jobs comes before starting new ones."""
@@ -76,6 +83,8 @@ class Worker:
         if job is not None:
             await self._with_heartbeat(job, self._publish)
             return True
+        if not await self._within_daily_budget():
+            return False
         job = await asyncio.to_thread(
             repo.claim_next, self.worker_id, from_status="queued", to_status="running"
         )
@@ -115,6 +124,12 @@ class Worker:
             review=state.get("review"),
             routes=state.get("routes", []),
             llm_calls=state.get("llm_calls", 0),
+            tokens_in=state.get("tokens_in", 0),
+            tokens_out=state.get("tokens_out", 0),
+            cost_usd=state.get("cost_usd", 0.0),
+            risk_level=state.get("risk_level"),
+            policy_findings=state.get("policy_findings", []),
+            duration_ms=state.get("duration_ms"),
             error=state.get("error"),
         )
 
@@ -171,6 +186,21 @@ class Worker:
         )
 
     # ------------------------------------------------------------------ helpers
+    async def _within_daily_budget(self) -> bool:
+        """New coding jobs wait in the queue once today's list-price LLM spend reaches the limit.
+        Approved jobs are still published (publishing uses no LLM)."""
+        spent = await asyncio.to_thread(repo.spend_today)
+        if spent < self.settings.daily_budget_usd:
+            self._budget_warned = False
+            return True
+        if not self._budget_warned:
+            logger.warning(
+                "daily LLM budget reached; new jobs wait until tomorrow (UTC)",
+                extra={"spent_usd": round(spent, 4), "budget_usd": self.settings.daily_budget_usd},
+            )
+            self._budget_warned = True
+        return False
+
     async def _audit_sink(self, event: dict[str, Any]) -> None:
         await asyncio.to_thread(repo.insert_audit_event, event)
 

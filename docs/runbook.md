@@ -58,6 +58,25 @@ Check `GET /jobs/{id}` (status, `error`, `attempts`) and `GET /jobs/{id}/audit` 
 
 Never edit `audit_log`; it is append-only by design (triggers reject UPDATE/DELETE).
 
+## Governance events
+
+- **`handed_off`: "breaks the policy"** — the final diff touched a protected path or exceeded
+  size limits (`policy_findings` lists which). Protected paths are in
+  `governance/policies/default.yaml`; change them only through a reviewed pull request.
+- **`handed_off`: "looks like a secret"** — the change contained a token or key. Check the
+  repository for committed secrets and rotate them; nothing was packaged or pushed.
+- **`handed_off`: "after reading suspicious content"** — an agent tried a blocked action right
+  after reading instruction-like text. Treat the repository content as hostile until reviewed;
+  the audit log shows the file and the snippet.
+- **`handed_off`: "cost budget exhausted" / "Time limit reached"** — the job hit
+  `MAX_COST_PER_JOB_USD` or `JOB_TIMEOUT_SECONDS`. Check `routes` for loops before raising limits.
+- **New jobs stay `queued`; logs say "daily LLM budget reached"** — `DAILY_BUDGET_USD` was spent
+  (UTC day). Approved jobs still publish. Raise the budget or wait for midnight UTC.
+- **`expired`** — nobody decided within `APPROVAL_TTL_HOURS`. Resubmit the task.
+- **403 "not on the approvers list"** — the user isn't in `APPROVERS`.
+- **Job `failed`: "GitHub App is not installed on …"** — install the App on that repository
+  (GitHub → Settings → Applications → the App → Configure).
+
 ## Rotating secrets
 
 | Secret | Where to rotate | Then update |
@@ -68,5 +87,6 @@ Never edit `audit_log`; it is append-only by design (triggers reject UPDATE/DELE
 | Groq key | console.groq.com → API Keys | Northflank `GROQ_API_KEY` |
 | Agent GitHub token | GitHub → Developer settings → Fine-grained tokens | Northflank `GITHUB_TOKEN` |
 | A user's API key | generate a new key | Northflank `API_KEYS` (replace that user's entry) |
+| GitHub App private key | App settings → Private keys → Generate (then delete the old key) | Northflank `GITHUB_APP_PRIVATE_KEY` |
 
 Redeploy after rotating runtime secrets.

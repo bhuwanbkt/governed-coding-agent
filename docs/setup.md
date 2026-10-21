@@ -137,9 +137,48 @@ Nothing new is required. Optional Northflank variables:
 | `AGENT_MAX_LLM_CALLS` | `40` | Lower to cap cost; jobs that hit it are handed off |
 | `RETRIEVAL_EMBEDDINGS` | `false` | `true` for hybrid search; check memory first (model ~100 MB + ONNX runtime) |
 
+## 9. Phase 4: GitHub App and governance settings
+
+### Create the GitHub App (about 10 minutes)
+
+1. GitHub → your profile picture → **Settings** → **Developer settings** → **GitHub Apps** →
+   **New GitHub App**.
+2. Fill in:
+   - **GitHub App name:** something unique, e.g. `bhuwanbkt-governed-agent`. Commits and PRs
+     will show `<name>[bot]`.
+   - **Homepage URL:** your repository URL.
+   - **Webhook:** untick **Active** (the agent doesn't receive events).
+   - **Repository permissions:** **Contents: Read and write**, **Pull requests: Read and write**
+     (Metadata: Read-only is added automatically). Nothing else.
+   - **Where can this GitHub App be installed?** Only on this account.
+3. **Create GitHub App**. On the next page note the **App ID**.
+4. Scroll to **Private keys** → **Generate a private key**. A `.pem` file downloads. Treat it like
+   a password: don't commit it, don't paste it into chats.
+5. Left menu → **Install App** → **Install** → **Only select repositories** →
+   `agent-sandbox-repo` → **Install**.
+
+### Add it to Northflank
+
+Service → **Environment** (secret):
+
+| Variable | Value |
+|---|---|
+| `GITHUB_APP_ID` | the App ID from step 3 |
+| `GITHUB_APP_PRIVATE_KEY` | the full contents of the `.pem` file (multi-line is fine in Northflank; on one line, write newlines as `\n`) |
+| `GIT_AUTHOR_NAME` | optional: `<app-name>[bot]` |
+| `APPROVERS` | `bob` (only listed users may approve; empty = anyone except the requester) |
+
+Optional: `MAX_COST_PER_JOB_USD` (default 0.50), `DAILY_BUDGET_USD` (5.00),
+`JOB_TIMEOUT_SECONDS` (1200), `APPROVAL_TTL_HOURS` (24).
+
+Once the App works, remove `GITHUB_TOKEN` from Northflank and delete that personal token in
+GitHub: the agent no longer needs a person's credentials in production.
+
+**Check:** run a job. Its audit log starts with a `credentials` event ("GitHub App token for
+bhuwanbkt/agent-sandbox-repo …"), and the pull request is opened by `<app-name>[bot]`.
+
 ## Coming in later phases
 
 | Phase | Setup needed |
 |---|---|
-| 4 | GitHub App instead of the personal token |
 | 6 | Langfuse project keys, optional Cerebras / Anthropic keys |

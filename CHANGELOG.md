@@ -5,6 +5,21 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (phase 4)
+- GitHub App authentication: per-job installation tokens limited to one repository and one hour;
+  personal token only as a local fallback (ADR 0010).
+- Governance policy file (`policies/default.yaml`): protected paths, sensitive paths, diff limits,
+  allowed test commands; enforced on tool calls and on the final patch (ADR 0011).
+- Secret detection on the patch (hard stop) and redaction of audit events, test output,
+  summaries and PR bodies.
+- Prompt-injection tripwire on content agents read; a blocked action after it hands off the job.
+- Budgets: list-price LLM cost per job, wall-clock time per job, daily spend across jobs.
+- Approvals: approvers list, expiry (`expired` status), risk level with reasons on every job.
+- Migration 0004: `risk_level`, `policy_findings`, `duration_ms`, `expired`; token and cost
+  columns are now filled.
+- Attack tests: CI/deploy file edits, indirect writes via tests, committed secrets, injected
+  instructions, cost and time limits.
+
 ### Added (phase 3)
 - Multi-agent workflow: planner, coder, tester and reviewer agents with per-role tools, prompts
   and structured outputs (`submit_plan`, `submit_review`).

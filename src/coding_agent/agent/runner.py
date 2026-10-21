@@ -9,9 +9,11 @@ worker (each half picked up from the Postgres queue).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import shutil
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,8 +22,11 @@ from typing import Any, cast
 from coding_agent.agent.graph import AgentDeps, AgentLimits, AgentState, build_graph
 from coding_agent.agent.llm import ModelProvider, build_models
 from coding_agent.agent.publish import PublishRequest, PublishResult, publish
-from coding_agent.agent.toolbox import AuditSink, LoopDetectedError, Toolbox
+from coding_agent.agent.toolbox import AuditSink, InjectionSuspectedError, LoopDetectedError, Toolbox
 from coding_agent.config import Settings
+from coding_agent.governance.github_app import installation_token, parse_github_repo
+from coding_agent.governance.policy import Policy, load_policy
+from coding_agent.governance.redact import redact
 from coding_agent.observability.logging import job_id_var
 from coding_agent.prompts import get_registry
 
@@ -53,7 +58,38 @@ def normalize_repo_url(repo_url: str) -> str:
     return repo_url
 
 
-def _server_env(settings: Settings) -> dict[str, str]:
+def _policy(settings: Settings) -> Policy:
+    return load_policy(str(settings.policy_file) if settings.policy_file else None)
+
+
+async def _github_token(
+    settings: Settings, repo_url: str, job_id: str, audit_sink: AuditSink | None
+) -> str | None:
+    """A one-hour, one-repository GitHub App token when the App is configured; otherwise the
+    personal token (local development, tests). Raises if the App is configured but can't issue
+    a token: falling back silently would push with the wrong identity."""
+    app_id, key = settings.github_app_id, settings.app_private_key()
+    if app_id is None or key is None or parse_github_repo(repo_url) is None:
+        return settings.github_token.get_secret_value() if settings.github_token else None
+    issued = await asyncio.to_thread(installation_token, app_id, key, repo_url)
+    if audit_sink is not None:
+        await audit_sink(
+            {
+                "event_type": "system",
+                "job_id": job_id,
+                "actor": "credentials",
+                "tool": None,
+                "allowed": True,
+                "args_masked": None,
+                "result_summary": f"GitHub App token for {issued.repository} "
+                f"(installation {issued.installation_id}, expires {issued.expires_at})",
+                "duration_ms": None,
+            }
+        )
+    return issued.token
+
+
+def _server_env(settings: Settings, github_token: str | None = None) -> dict[str, str]:
     env = {
         "ALLOWED_TEST_COMMANDS": settings.allowed_test_commands,
         "GIT_AUTHOR_NAME": settings.git_author_name,
@@ -64,8 +100,8 @@ def _server_env(settings: Settings) -> dict[str, str]:
     }
     if virtual_env := os.environ.get("VIRTUAL_ENV"):
         env["VIRTUAL_ENV"] = virtual_env
-    if settings.github_token is not None:
-        env["GITHUB_TOKEN"] = settings.github_token.get_secret_value()
+    if github_token:
+        env["GITHUB_TOKEN"] = github_token
     return env
 
 
@@ -116,14 +152,18 @@ async def run_coding_job(
     }
     logger.info("coding started", extra={"repo_url": request.repo_url})
     final: dict[str, Any]
+    started = time.monotonic()
     try:
+        policy = _policy(settings)
+        github_token = await _github_token(settings, initial["repo_url"], job_id, audit_sink)
         async with Toolbox.connect(
             workspace,
             job_id=job_id,
-            env=_server_env(settings),
+            env=_server_env(settings, github_token),
             audit_sink=audit_sink,
             servers=("workspace", "code_index"),
             server_env={"code_index": _index_env(settings)},
+            policy=policy,
         ) as toolbox:
             graph = build_graph(
                 AgentDeps(
@@ -134,26 +174,43 @@ async def run_coding_job(
                         max_fix_attempts=settings.agent_max_fix_attempts,
                         max_llm_turns=settings.agent_max_llm_turns,
                         max_llm_calls=settings.agent_max_llm_calls,
+                        max_cost_usd=settings.max_cost_per_job_usd,
+                        prices_per_mtok=settings.llm_prices(),
                         max_review_rounds=settings.agent_max_review_rounds,
                         max_replans=settings.agent_max_replans,
                         min_llm_interval_seconds=0.0 if models else settings.llm_min_interval_seconds,
                         supervisor_mode=settings.supervisor_mode,
                     ),
                     provider=settings.llm_provider,
+                    policy=policy,
                 )
             )
             # Handle errors inside the session: once they cross the MCP client's task group
             # they arrive wrapped in an ExceptionGroup.
             try:
-                final = await graph.ainvoke(initial, config={"recursion_limit": 100})
-            except LoopDetectedError as exc:
+                async with asyncio.timeout(settings.job_timeout_seconds):
+                    final = await graph.ainvoke(initial, config={"recursion_limit": 100})
+            except (LoopDetectedError, InjectionSuspectedError) as exc:
                 final = {**initial, "status": "handed_off", "error": str(exc)}
+            except TimeoutError:
+                final = {
+                    **initial,
+                    "status": "handed_off",
+                    "error": f"Time limit reached ({settings.job_timeout_seconds} s); needs a human.",
+                }
+            if toolbox.injection_flags:
+                findings = [{"kind": "injection", "detail": f} for f in toolbox.injection_flags[:20]]
+                final.setdefault("policy_findings", findings)
     except Exception as exc:
         logger.exception("coding crashed")
         final = {**initial, "status": "failed", "error": f"{type(exc).__name__}: {exc}"}
     finally:
         _cleanup(settings, workspace)
         job_id_var.reset(token)
+    final["duration_ms"] = int((time.monotonic() - started) * 1000)
+    for key in ("coder_summary", "test_output", "error"):  # never store or show secrets
+        if isinstance(final.get(key), str):
+            final[key] = redact(final[key])
     logger.info("coding finished", extra={"job_id": job_id, "status": final.get("status")})
     return cast(AgentState, final)
 
@@ -165,8 +222,13 @@ async def run_publish_job(
     token = job_id_var.set(request.job_id)
     workspace = _workspace(settings, request.job_id, "publish")
     try:
+        github_token = await _github_token(settings, request.repo_url, request.job_id, audit_sink)
         async with Toolbox.connect(
-            workspace, job_id=request.job_id, env=_server_env(settings), audit_sink=audit_sink
+            workspace,
+            job_id=request.job_id,
+            env=_server_env(settings, github_token),
+            audit_sink=audit_sink,
+            policy=_policy(settings),
         ) as toolbox:
             try:
                 result = await publish(toolbox, request)
