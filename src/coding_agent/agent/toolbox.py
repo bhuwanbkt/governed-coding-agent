@@ -29,6 +29,7 @@ from mcp.client.stdio import stdio_client
 from coding_agent.governance import injection
 from coding_agent.governance.policy import WRITE_TOOLS, Policy
 from coding_agent.governance.redact import redact, redact_value
+from coding_agent.observability.tracing import tracer
 
 logger = logging.getLogger("coding_agent.audit")
 
@@ -126,6 +127,18 @@ class Toolbox:
 
     async def call(self, name: str, args: Mapping[str, Any], *, actor: str, allowed: Collection[str]) -> str:
         """Call a tool on behalf of `actor`. Returns text; tool errors come back as 'ERROR: ...'."""
+        with tracer().observe(
+            f"tool.{name}", as_type="tool", input=_mask_args(args), metadata={"actor": actor}
+        ) as span:
+            try:
+                text = await self._call(name, args, actor=actor, allowed=allowed)
+            except Exception as exc:  # blocked, loop or injection stop: visible in the trace
+                span.update(level="WARNING", status_message=f"{type(exc).__name__}: {exc}"[:500])
+                raise
+            span.update(output=redact(text), level="ERROR" if text.startswith("ERROR") else None)
+            return text
+
+    async def _call(self, name: str, args: Mapping[str, Any], *, actor: str, allowed: Collection[str]) -> str:
         start = time.perf_counter()
         if name not in allowed or name not in self.specs:
             await self._audit(

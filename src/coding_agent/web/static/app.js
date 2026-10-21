@@ -21,3 +21,8 @@ document.querySelectorAll("[data-poll]").forEach((el) => {
   };
   window.setTimeout(tick, every);
 });
+
+// Bar widths (the CSP forbids inline style attributes; setting them from this script is allowed).
+document.querySelectorAll(".bar[data-width]").forEach((el) => {
+  el.style.width = `${Math.max(0, Math.min(100, Number(el.dataset.width) || 0))}%`;
+});

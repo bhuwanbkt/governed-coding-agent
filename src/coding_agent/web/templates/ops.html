@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Ops · Governed Coding Agent{% endblock %}
+{% block content %}
+<p><a href="/ui">← All jobs</a></p>
+<section class="card">
+  <div class="row">
+    <h1>Operations</h1>
+    <span class="spacer"></span>
+    {% for d in (1, 7, 30) %}<a class="badge {{ 'info' if d == days else 'neutral' }}" href="/ui/ops?days={{ d }}">{{ d }}d</a>{% endfor %}
+  </div>
+  <dl class="stats">
+    <div><dt>Queued now</dt><dd>{{ snap.queued_now }}</dd></div>
+    <div><dt>Running now</dt><dd>{{ snap.running_now }}</dd></div>
+    <div><dt>Awaiting approval</dt><dd>{{ snap.awaiting_now }}</dd></div>
+    <div><dt>Spend today</dt><dd>${{ '%.4f'|format(snap.spend_today_usd) }} <span class="muted small">of ${{ '%.2f'|format(snap.daily_budget_usd) }}</span></dd></div>
+  </dl>
+</section>
+
+<section class="card">
+  <h2>Service level objectives <span class="muted small">last {{ days }} day(s)</span></h2>
+  <table class="jobs">
+    <thead><tr><th>SLO</th><th>Objective</th><th>Actual</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for slo in snap.slos %}
+      <tr>
+        <td>{{ slo.name }}</td>
+        <td class="muted">{{ slo.objective }}</td>
+        <td class="num">{{ slo.actual }}</td>
+        <td>{% if slo.met is none %}<span class="badge neutral">no data</span>{% elif slo.met %}<span class="badge good">met</span>{% else %}<span class="badge bad">missed</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<div class="columns">
+  <section class="card">
+    <h2>Outcomes <span class="muted small">{{ snap.total }} job(s)</span></h2>
+    {% if snap.by_status %}
+    <table class="jobs">
+      <tbody>
+      {% for status, n in snap.by_status|dictsort(by='value', reverse=true) %}
+        <tr><td><span class="badge {{ status_tone.get(status, 'neutral') }}">{{ status.replace('_', ' ') }}</span></td><td class="num">{{ n }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="muted">No jobs in this window.</p>{% endif %}
+  </section>
+  <section class="card">
+    <h2>Latency</h2>
+    <table class="jobs">
+      <thead><tr><th></th><th class="num">p50</th><th class="num">p95</th></tr></thead>
+      <tbody>
+        <tr><td>Coding run</td><td class="num">{{ snap.duration_p50_s|secs }}</td><td class="num">{{ snap.duration_p95_s|secs }}</td></tr>
+        <tr><td>Queue wait</td><td class="num">{{ snap.queue_wait_p50_s|secs }}</td><td class="num">{{ snap.queue_wait_p95_s|secs }}</td></tr>
+        <tr><td>Waiting for a human <span class="muted small">({{ snap.approvals }})</span></td><td class="num">{{ snap.approval_wait_p50_s|secs }}</td><td class="num">{{ snap.approval_wait_p95_s|secs }}</td></tr>
+      </tbody>
+    </table>
+    <p class="muted small">Average per finished job: {% if snap.avg_cost_usd is not none %}${{ '%.4f'|format(snap.avg_cost_usd) }}, {{ snap.avg_llm_calls }} LLM calls{% else %}–{% endif %}</p>
+  </section>
+</div>
+
+<div class="columns">
+  <section class="card">
+    <h2>Cost per day <span class="muted small">list price</span></h2>
+    {% if snap.cost_by_day %}
+    <table class="jobs bars">
+      <tbody>
+      {% for day, cost, n in snap.cost_by_day %}
+        <tr>
+          <td class="muted">{{ day.isoformat() }}</td>
+          <td class="bar-cell"><span class="bar" data-width="{{ ((cost / peak * 100) if peak else 0)|round|int }}"></span></td>
+          <td class="num">${{ '%.4f'|format(cost) }}</td>
+          <td class="num muted">{{ n }} job(s)</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="muted">No jobs in this window.</p>{% endif %}
+  </section>
+  <section class="card">
+    <h2>Top hand-off reasons</h2>
+    {% if snap.hand_off_reasons %}
+    <ol class="findings">{% for reason, n in snap.hand_off_reasons %}<li><b>{{ n }}×</b> {{ reason }}</li>{% endfor %}</ol>
+    {% else %}<p class="muted">No hand-offs in this window.</p>{% endif %}
+  </section>
+</div>
+{% endblock %}

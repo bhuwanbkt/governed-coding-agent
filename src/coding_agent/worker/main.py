@@ -101,6 +101,7 @@ class Worker:
                 task=job.task,
                 base_branch=job.base_branch,
                 test_command=job.test_command,
+                requested_by=job.requested_by,
             ),
             self.settings,
             job_id=str(job.id),

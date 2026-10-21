@@ -10,6 +10,7 @@ import pytest
 
 from coding_agent.config import get_settings
 from coding_agent.db.session import get_engine
+from coding_agent.observability import tracing
 
 SAMPLE_REPO = Path(__file__).resolve().parents[1] / "evals" / "sample_repo"
 POSTGRES_IMAGE = "pgvector/pgvector:pg16"  # same image as docker-compose.yml
@@ -24,9 +25,13 @@ def _clear_caches() -> None:
 def isolated_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Each test builds settings from its own env, never from a developer's local .env."""
     monkeypatch.setenv("APP_ENV", "test")
+    for name in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"):  # never trace test runs
+        monkeypatch.setenv(name, "")
+    previous = tracing.set_tracer(tracing.Tracer())
     _clear_caches()
     yield
     _clear_caches()
+    tracing.set_tracer(previous)
 
 
 def _git(cwd: Path, *args: str) -> None:

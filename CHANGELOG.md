@@ -5,6 +5,17 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (phase 6a: observability)
+- Langfuse tracing: one trace per job (coding and publishing together), with a span per graph
+  step, a generation per LLM call (model, prompt version, tokens, cost) and a span per tool call
+  (masked arguments, redacted result, blocked calls flagged). Scores for status, risk, cost and
+  duration. Off without keys; never breaks a job (ADR 0013).
+- Job page links to its trace.
+- Ops page (`/ui/ops`, approvers): SLOs with met/missed, outcomes, latency (run, queue, waiting
+  for a human), cost per day, top hand-off reasons, current queue and spend.
+- `/metrics` in Prometheus format for a scraper, limited to `METRICS_READERS`.
+- SLOs and tracing in the runbook; `coding-agent trace-check` to verify Langfuse settings.
+
 ### Fixed
 - A repository URL must name one repository (`https://host/owner/repo`). A bare allowlist prefix
   such as `https://github.com/owner/` used to be queued and then fail at clone time; it's now

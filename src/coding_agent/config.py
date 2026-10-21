@@ -10,7 +10,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppEnv = Literal["local", "test", "production"]
@@ -87,6 +87,19 @@ class Settings(BaseSettings):
     oidc_roles_claim: str | None = None  # other providers: claim holding roles, e.g. "roles"
     session_secret: SecretStr | None = None  # signs the session cookie; required in production
     session_max_age_hours: float = 8.0
+
+    # --- tracing (phase 6) -----------------------------------------------------------------
+    # Langfuse. Unset keys = tracing off (tests, CI, local by default).
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: SecretStr | None = None
+    # LANGFUSE_BASE_URL (Langfuse's current name) or LANGFUSE_HOST (older name). EU is the default.
+    langfuse_base_url: str = Field(
+        default="https://cloud.langfuse.com",
+        validation_alias=AliasChoices("langfuse_base_url", "langfuse_host"),
+    )
+    langfuse_sample_rate: float = 1.0  # share of jobs traced
+    # Prometheus-style /metrics: users from API_KEYS allowed to read it. Empty = endpoint off.
+    metrics_readers: str = ""
     git_author_name: str = "governed-coding-agent"
     git_author_email: str = "agent@users.noreply.github.com"
 
@@ -116,6 +129,8 @@ class Settings(BaseSettings):
         "oidc_project_id",
         "oidc_roles_claim",
         "session_secret",
+        "langfuse_public_key",
+        "langfuse_secret_key",
         mode="before",
     )
     @classmethod
@@ -149,6 +164,10 @@ class Settings(BaseSettings):
             raise ValueError("SESSION_SECRET is required for the web UI in production")
         if self.session_secret is not None and len(self.session_secret.get_secret_value()) < 32:
             raise ValueError("SESSION_SECRET must be at least 32 characters")
+        if (self.langfuse_public_key is None) != (self.langfuse_secret_key is None):
+            raise ValueError("set both LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY, or neither")
+        if not 0.0 <= self.langfuse_sample_rate <= 1.0:
+            raise ValueError("LANGFUSE_SAMPLE_RATE must be between 0 and 1")
         if self.max_cost_per_job_usd <= 0 or self.daily_budget_usd <= 0 or self.job_timeout_seconds <= 0:
             raise ValueError("budgets and the job timeout must be positive")
         return self
@@ -162,6 +181,9 @@ class Settings(BaseSettings):
     @property
     def oidc_enabled(self) -> bool:
         return self.oidc_issuer is not None and self.oidc_client_id is not None
+
+    def metrics_reader_set(self) -> frozenset[str]:
+        return frozenset(a.strip() for a in self.metrics_readers.split(",") if a.strip())
 
     def approver_set(self) -> frozenset[str]:
         return frozenset(a.strip() for a in self.approvers.split(",") if a.strip())

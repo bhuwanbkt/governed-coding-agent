@@ -20,6 +20,8 @@ from pydantic import ValidationError
 from coding_agent.api.jobs import JobCreate
 from coding_agent.config import get_settings
 from coding_agent.db import jobs as repo
+from coding_agent.db import ops
+from coding_agent.observability.tracing import tracer
 from coding_agent.web import session as web_session
 from coding_agent.web.oidc import OIDCClient, OIDCError, new_login_request
 
@@ -54,7 +56,15 @@ def ago(value: datetime | None) -> str:
     return f"{seconds}s ago"
 
 
+def secs(value: float | None) -> str:
+    """12.3 -> '12 s', 754 -> '12.6 min', None -> a dash."""
+    if value is None:
+        return "\u2013"
+    return f"{value:.0f} s" if value < 120 else f"{value / 60:.1f} min"
+
+
 templates.env.filters["ago"] = ago
+templates.env.filters["secs"] = secs
 templates.env.globals["status_tone"] = STATUS_TONE
 
 
@@ -232,6 +242,19 @@ def submit_job(
     return RedirectResponse(f"/ui/jobs/{job.id}", status_code=status.HTTP_303_SEE_OTHER)
 
 
+@router.get("/ui/ops", name="ops_page", response_model=None)
+def ops_page(request: Request, days: int = 7) -> Response:
+    """Operations view for approvers: SLOs, throughput, latency, cost and hand-off reasons."""
+    user = web_session.require_user(request)
+    if not user.is_approver:
+        text = "The ops page needs the approver role."
+        return message(request, "Not allowed", text, status.HTTP_403_FORBIDDEN)
+    days = days if days in (1, 7, 30) else 7
+    snap = ops.snapshot(days, daily_budget_usd=get_settings().daily_budget_usd)
+    peak = max((cost for _, cost, _ in snap.cost_by_day), default=0.0)
+    return render(request, "ops.html", {"snap": snap, "days": days, "peak": peak})
+
+
 def job_context(request: Request, job: repo.Job, error: str | None = None) -> dict[str, Any]:
     user = web_session.require_user(request)
     can_decide = (
@@ -246,6 +269,7 @@ def job_context(request: Request, job: repo.Job, error: str | None = None) -> di
         "active": job.status in ACTIVE_STATUSES,
         "can_decide": can_decide,
         "own_job": user.name.lower() == job.requested_by.lower(),
+        "trace_url": tracer().trace_url(str(job.id)),
         "error": error,
     }
 

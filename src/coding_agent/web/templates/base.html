@@ -11,6 +11,7 @@
   <header class="topbar">
     <a class="brand" href="/ui">Governed Coding Agent</a>
     {% if env != "production" %}<span class="badge neutral">{{ env }}</span>{% endif %}
+    {% if user %}<nav class="links"><a href="/ui">Jobs</a>{% if user.is_approver %}<a href="/ui/ops">Ops</a>{% endif %}</nav>{% endif %}
     <span class="spacer"></span>
     {% if user %}
       <span class="who">{{ user.name }}</span>

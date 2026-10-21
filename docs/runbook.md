@@ -10,6 +10,8 @@ Operational procedures for production (Northflank + Neon). Grows with each phase
 | Which version is live? | `GET /version` (commit SHA) |
 | Logs | Northflank → service → Logs. Filter by `request_id` or `job_id` |
 | Last deploy | GitHub → Actions → "Deploy to production" (summary shows image + rollback target) |
+| SLOs, queue, spend, hand-off reasons | `/ui/ops` (approver role), or `/metrics` for a scraper |
+| What one job did, step by step | Job page → **Trace in Langfuse**: every step, LLM call (prompt, tokens, cost) and tool call |
 
 ## Deploy failed
 
@@ -77,6 +79,30 @@ Never edit `audit_log`; it is append-only by design (triggers reject UPDATE/DELE
 - **Job `failed`: "GitHub App is not installed on …"** — install the App on that repository
   (GitHub → Settings → Applications → the App → Configure).
 
+## SLOs
+
+Measured from the database over a rolling window (1, 7 or 30 days) and shown on `/ui/ops`.
+Targets live in `src/coding_agent/db/ops.py`.
+
+| SLO | Objective | Why it matters | When it's missed |
+|---|---|---|---|
+| Job duration | ≥ 95% of coding runs finish within 10 min | Reviewers are waiting; long runs burn budget | Open slow jobs' traces: look for rate-limit waits (`rate limited` events), long test runs, or many coder rounds. Lower `AGENT_MAX_LLM_CALLS`, or raise `LLM_MIN_INTERVAL_SECONDS` if the provider throttles |
+| Infrastructure failures | ≤ 5% of finished jobs end in `failed` | `failed` means the platform broke, not the agent (hand-offs are expected and excluded) | Check the job errors and Northflank logs: clone failures, provider outages, MCP server crashes, DB errors |
+| Queue wait | p95 submit-to-pickup ≤ 60 s | The worker is alive and keeping up | Is the worker running (`RUN_WORKER_IN_API=true`)? Check heartbeats in the logs; a long job blocks the single worker on the free tier |
+| Daily spend | Spend today ≤ `DAILY_BUDGET_USD` | Cost control | New jobs already wait automatically. Check the cost-per-day chart and the most expensive traces in Langfuse |
+
+The SLOs are a signal for whoever operates the service, not an alerting system: the free tier
+has no paging. `/metrics` exposes them as `gca_slo_met` for a scraper if one is added later.
+
+## Tracing (Langfuse)
+
+- Every job is one trace (ID derived from the job ID). Coding and publishing are two root spans
+  in it, so the wait for approval is visible too.
+- Inputs and outputs are redacted before they leave the process (same rules as the audit log).
+- If Langfuse is down or the keys are wrong, jobs still run; the log shows `tracing:` warnings.
+- Turn tracing off by removing `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`, or sample with
+  `LANGFUSE_SAMPLE_RATE`.
+
 ## Rotating secrets
 
 | Secret | Where to rotate | Then update |
@@ -88,5 +114,8 @@ Never edit `audit_log`; it is append-only by design (triggers reject UPDATE/DELE
 | Agent GitHub token | GitHub → Developer settings → Fine-grained tokens | Northflank `GITHUB_TOKEN` |
 | A user's API key | generate a new key | Northflank `API_KEYS` (replace that user's entry) |
 | GitHub App private key | App settings → Private keys → Generate (then delete the old key) | Northflank `GITHUB_APP_PRIVATE_KEY` |
+| Langfuse keys | Langfuse → Project settings → API keys (create new, then delete old) | Northflank `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` |
+| Zitadel client secret | Zitadel → project → app → Regenerate secret | Northflank `OIDC_CLIENT_SECRET` |
+| Session secret | `openssl rand -base64 48` (signs everyone out) | Northflank `SESSION_SECRET` |
 
 Redeploy after rotating runtime secrets.
