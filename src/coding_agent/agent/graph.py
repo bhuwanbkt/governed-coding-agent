@@ -16,8 +16,8 @@ Routing at the two decision points ([after_test], [after_review]) is made by `de
   options the policy allows in the current state, and hard rules (e.g. nothing reaches review or
   approval with failing tests) override it. Rejected proposals are audited as `policy_block`.
 
-Budgets bound every loop: fix attempts, re-plans, review rounds, turns per agent and LLM calls
-per job. When a budget runs out the job is handed to a human instead of looping (ADR 0008).
+Budgets bound every loop: fix attempts, re-plans, review rounds, turns per agent, LLM calls and
+LLM cost per job. When a budget runs out the job is handed to a human instead of looping (ADR 0008).
 """
 
 from __future__ import annotations
@@ -49,6 +49,10 @@ from coding_agent.agent.roles import (
 )
 from coding_agent.agent.schemas import Plan, ReviewVerdict, submit_tool_schema
 from coding_agent.agent.toolbox import LoopDetectedError, Toolbox, ToolNotAllowedError
+from coding_agent.governance.policy import Policy
+from coding_agent.governance.pricing import cost_usd
+from coding_agent.governance.redact import find_secrets
+from coding_agent.governance.risk import assess
 from coding_agent.prompts import PromptRegistry
 
 logger = logging.getLogger(__name__)
@@ -89,6 +93,12 @@ class AgentState(TypedDict, total=False):
     routes: list[dict[str, str]]
     halt: str | None  # set when a budget runs out or an agent can't produce its output
     llm_calls: int
+    tokens_in: int
+    tokens_out: int
+    cost_usd: float
+    risk_level: str
+    policy_findings: list[dict[str, str]]
+    duration_ms: int
     diff: str
     patch: str
     diff_sha256: str
@@ -103,6 +113,8 @@ class AgentLimits:
     max_fix_attempts: int = 2  # coder retries after failing tests
     max_llm_turns: int = 25  # per coder run
     max_llm_calls: int = 40  # whole job, all agents
+    max_cost_usd: float = float("inf")  # list-price LLM cost, whole job
+    prices_per_mtok: tuple[float, float] = (0.0, 0.0)
     max_review_rounds: int = 1
     max_replans: int = 1
     min_llm_interval_seconds: float = 0.0  # pacing for rate-limited providers
@@ -116,6 +128,7 @@ class AgentDeps:
     prompts: PromptRegistry
     limits: AgentLimits
     provider: str | None = None
+    policy: Policy | None = None
 
 
 class BudgetExhaustedError(RuntimeError):
@@ -149,18 +162,38 @@ def build_graph(deps: AgentDeps) -> Any:
     toolbox, limits = deps.toolbox, deps.limits
     calls = 0
     last_call = 0.0
+    tokens = {"in": 0, "out": 0}
+
+    def spent() -> float:
+        return cost_usd(tokens["in"], tokens["out"], limits.prices_per_mtok)
+
+    def usage() -> dict[str, Any]:
+        return {
+            "llm_calls": calls,
+            "tokens_in": tokens["in"],
+            "tokens_out": tokens["out"],
+            "cost_usd": round(spent(), 6),
+        }
 
     # ------------------------------------------------------------------ LLM plumbing
     async def llm(model: ToolCallingModel, messages: list[BaseMessage]) -> BaseMessage:
         nonlocal calls, last_call
         if calls >= limits.max_llm_calls:
             raise BudgetExhaustedError(f"LLM call budget exhausted ({limits.max_llm_calls} calls)")
+        if spent() >= limits.max_cost_usd:
+            raise BudgetExhaustedError(
+                f"LLM cost budget exhausted (${spent():.4f} of ${limits.max_cost_usd:.2f})"
+            )
         wait = limits.min_llm_interval_seconds - (time.monotonic() - last_call)
         if wait > 0:
             await asyncio.sleep(wait)
         last_call = time.monotonic()
         calls += 1
-        return await model.ainvoke(messages)
+        response = await model.ainvoke(messages)
+        metadata = getattr(response, "usage_metadata", None) or {}
+        tokens["in"] += int(metadata.get("input_tokens", 0) or 0)
+        tokens["out"] += int(metadata.get("output_tokens", 0) or 0)
+        return response
 
     async def run_agent(role: Role, variables: dict[str, Any], kickoff: str) -> AgentRun:
         """Tool-calling loop for one agent. Agents with a structured output finish by calling
@@ -259,7 +292,7 @@ def build_graph(deps: AgentDeps) -> Any:
             f"{point} -> {choice} ({source}): {reason}",
         )
         route = {"point": point, "choice": choice, "source": source, "reason": reason}
-        return {"next_step": choice, "routes": [*state.get("routes", []), route], "llm_calls": calls}
+        return {"next_step": choice, "routes": [*state.get("routes", []), route], **usage()}
 
     def situation(state: AgentState) -> str:
         review = state.get("review")
@@ -274,7 +307,7 @@ def build_graph(deps: AgentDeps) -> Any:
             f"- Fix attempts used: {state.get('fix_attempts', 0)} of {limits.max_fix_attempts}\n"
             f"- Re-plans used: {state.get('replans', 0)} of {limits.max_replans}\n"
             f"- Review rounds used: {state.get('review_rounds', 0)} of {limits.max_review_rounds}\n"
-            f"- LLM calls used: {calls} of {limits.max_llm_calls}\n"
+            f"- LLM calls used: {calls} of {limits.max_llm_calls} (cost ${spent():.4f})\n"
             f"- Tests: {'passing' if passed else 'failing'}\n\n"
             f'<untrusted kind="test-output">\n{tail(state.get("test_output", ""), 15)}\n</untrusted>\n\n'
             f"Review:\n{review_text}"
@@ -340,15 +373,15 @@ def build_graph(deps: AgentDeps) -> Any:
                 "Explore the repository, then submit your plan.",
             )
         except BudgetExhaustedError as exc:
-            return {"halt": str(exc), "llm_calls": calls}
+            return {"halt": str(exc), **usage()}
         refs = [*state.get("prompt_refs", []), run.prompt_ref]
         if run.output is None:
             return {
                 "halt": "The planner did not produce a valid plan.",
                 "prompt_refs": refs,
-                "llm_calls": calls,
+                **usage(),
             }
-        return {"plan": run.output.model_dump(), "coder_context": "", "prompt_refs": refs, "llm_calls": calls}
+        return {"plan": run.output.model_dump(), "coder_context": "", "prompt_refs": refs, **usage()}
 
     async def code(state: AgentState) -> dict[str, Any]:
         round_ = state.get("round", 0) + 1
@@ -369,12 +402,12 @@ def build_graph(deps: AgentDeps) -> Any:
                 "Start working on the task.",
             )
         except BudgetExhaustedError as exc:
-            return {"round": round_, "halt": str(exc), "llm_calls": calls}
+            return {"round": round_, "halt": str(exc), **usage()}
         return {
             "round": round_,
             "coder_summary": run.text,
             "prompt_refs": [*state.get("prompt_refs", []), run.prompt_ref],
-            "llm_calls": calls,
+            **usage(),
         }
 
     async def test(state: AgentState) -> dict[str, Any]:
@@ -423,13 +456,13 @@ def build_graph(deps: AgentDeps) -> Any:
                 "Review the change, then submit your verdict.",
             )
         except BudgetExhaustedError:
-            return {"review": _not_reviewed("Skipped: the LLM call budget ran out."), "llm_calls": calls}
+            return {"review": _not_reviewed("Skipped: the LLM call budget ran out."), **usage()}
         refs = [*state.get("prompt_refs", []), run.prompt_ref]
         if run.output is None:
             verdict = _not_reviewed("The reviewer did not return a valid verdict.")
         else:
             verdict = run.output.model_dump()
-        return {"review": verdict, "prompt_refs": refs, "llm_calls": calls}
+        return {"review": verdict, "prompt_refs": refs, **usage()}
 
     async def after_review(state: AgentState) -> dict[str, Any]:
         review_ = state.get("review")
@@ -454,25 +487,63 @@ def build_graph(deps: AgentDeps) -> Any:
         return decision
 
     async def package(state: AgentState) -> dict[str, Any]:
-        """Freeze the result for review: a readable diff plus the exact patch and its hash."""
+        """Freeze the result for review: a readable diff plus the exact patch and its hash.
+        Last gate before a human sees it: no secrets in the patch, and the diff must satisfy
+        the policy (protected paths, size limits), however the files were changed."""
         diff = await toolbox.call("git_diff", {}, actor="packager", allowed=PACKAGER_TOOLS)
         if diff.strip() == "(no changes)":
-            return {"diff": "", "status": "no_changes"}
+            return {"diff": "", "status": "no_changes", **usage()}
         patch = await toolbox.call("export_patch", {}, actor="packager", allowed=PACKAGER_TOOLS)
         if patch.startswith("ERROR"):
-            return {"status": "failed", "error": patch}
+            return {"status": "failed", "error": patch, **usage()}
+        findings: list[dict[str, str]] = [
+            {"kind": "injection", "detail": flag} for flag in toolbox.injection_flags[:20]
+        ]
+        if secrets := find_secrets(patch):
+            await toolbox.record(
+                "packager", "policy_block", f"patch contains secret-like values: {secrets}", allowed=False
+            )
+            findings.append({"kind": "secret", "detail": f"patch contains: {', '.join(secrets)}"})
+            return {
+                "status": "handed_off",
+                "error": f"The change contains what looks like a secret ({', '.join(secrets)}); "
+                "it was not packaged. A human must check the repository.",
+                "policy_findings": findings,
+                **usage(),
+            }
+        policy = deps.policy
+        if policy is not None and (violations := policy.check_patch(patch)):
+            for violation in violations:
+                await toolbox.record("packager", "policy_block", f"{policy.ref}: {violation}", allowed=False)
+            findings.extend({"kind": "violation", "detail": str(v)} for v in violations)
+            return {
+                "status": "handed_off",
+                "error": "The change breaks the policy: " + "; ".join(str(v) for v in violations),
+                "policy_findings": findings,
+                **usage(),
+            }
+        risk_level, reasons = (
+            assess(patch, policy, injection_flags=toolbox.injection_flags, review=state.get("review"))
+            if policy is not None
+            else ("low", [])
+        )
+        findings.extend({"kind": "risk", "detail": reason} for reason in reasons)
+        await toolbox.record("packager", "system", f"risk {risk_level}: {'; '.join(reasons) or 'no flags'}")
         return {
             "diff": diff,
             "patch": patch,
             "diff_sha256": hashlib.sha256(patch.encode()).hexdigest(),
             "status": "awaiting_approval",
+            "risk_level": risk_level,
+            "policy_findings": findings,
+            **usage(),
         }
 
     async def hand_off(state: AgentState) -> dict[str, Any]:
         reason = state.get("halt") or (
             f"Tests still failing after {state.get('round', 0)} coder round(s); needs a human."
         )
-        return {"status": "handed_off", "error": reason, "llm_calls": calls}
+        return {"status": "handed_off", "error": reason, **usage()}
 
     # ------------------------------------------------------------------ wiring
     def after_prepare(state: AgentState) -> str:

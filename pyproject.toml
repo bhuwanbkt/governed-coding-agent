@@ -24,6 +24,9 @@ dependencies = [
     "llama-index-retrievers-bm25>=0.5",
     "llama-index-embeddings-fastembed>=0.3",
     "tree-sitter-language-pack>=0.7",  # grammars for LlamaIndex's CodeSplitter
+    # governance (phase 4)
+    "pyyaml>=6.0",  # policy file
+    "pyjwt[crypto]>=2.9",  # GitHub App authentication (RS256)
     "pytest>=8.3",  # the agent runs target repositories' tests in production too
 ]
 
@@ -73,7 +76,7 @@ packages = ["coding_agent"]
 
 [[tool.mypy.overrides]]
 # Third-party packages without type information
-module = ["llama_index.*", "fastembed.*", "tree_sitter_language_pack.*", "bm25s.*"]
+module = ["llama_index.*", "fastembed.*", "tree_sitter_language_pack.*", "bm25s.*", "yaml.*"]
 ignore_missing_imports = true
 
 # --------------------------------------------------------------------------- pytest

@@ -1,0 +1,40 @@
+# Governance policy for the coding agents. Reviewed in pull requests like code.
+# Enforced on every tool call (Toolbox) and on the final diff (before human approval).
+# Paths are repository-relative globs: `*` stays inside one folder, `**` crosses folders.
+version: 1
+
+paths:
+  # Agents may never create, edit or delete these, whatever the task says.
+  deny_write:
+    - ".github/**"
+    - ".gitlab-ci.yml"
+    - "**/Jenkinsfile"
+    - "**/Dockerfile"
+    - "**/docker-compose*.yml"
+    - "**/deploy/**"
+    - "**/.env"
+    - "**/.env.*"
+    - "**/*.pem"
+    - "**/*.key"
+    - "**/id_rsa*"
+  # Allowed, but a change here raises the job's risk level for the human approver.
+  sensitive:
+    - "**/auth/**"
+    - "**/security/**"
+    - "**/migrations/**"
+    - "**/pyproject.toml"
+    - "**/requirements*.txt"
+    - "**/package.json"
+    - "**/*.lock"
+    - "**/*config*"
+    - "**/settings*"
+
+diff:
+  max_files: 20
+  max_lines: 1000
+
+tests:
+  # Exact command or the command followed by arguments, e.g. "pytest -q".
+  allowed_commands:
+    - "pytest"
+    - "python -m pytest"

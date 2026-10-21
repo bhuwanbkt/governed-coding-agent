@@ -8,8 +8,9 @@ plans the change, writes the code, runs the tests and reviews the diff, then **w
 human to approve** before it pushes a branch and opens a pull request. Every tool call is
 permission-checked, recorded in an append-only audit log, traced and measured.
 
-> **Status:** Phase 3 — planner, coder, tester and reviewer agents with LlamaIndex code search,
-> running behind a job API with human approval. See the [roadmap](#roadmap).
+> **Status:** Phase 4 — planner, coder, tester and reviewer agents with LlamaIndex code search,
+> governed by a policy file, budgets and a GitHub App identity, behind a job API with human
+> approval. See the [roadmap](#roadmap).
 
 ## Architecture
 
@@ -152,12 +153,17 @@ Setup steps for Neon, Northflank and GitHub are in [docs/setup.md](docs/setup.md
 
 ## Governance (by design)
 
-- Scoped tool permissions per agent; least privilege
-- Bounded autonomy: fix/re-plan/review rounds, LLM-call budget per job, loop detection, human handoff
-- Routing guarantees in code: an LLM may propose the next step, the policy decides
-- Human approval before any push, with **separation of duties** (enforced in the database)
-- **Append-only audit log** (UPDATE/DELETE/TRUNCATE blocked by database triggers)
-- Secret/PII masking, repo allowlist, prompt-injection controls, cost budgets
+| Control | How it's enforced |
+|---|---|
+| Least privilege | Per-agent tool allowlists in the Toolbox; read-only search server with no tokens |
+| **Policy as code** | [`policies/default.yaml`](src/coding_agent/governance/policies/default.yaml): protected paths (CI, deploy, secrets), diff size limits, allowed test commands. Checked on every tool call **and** on the final diff ([ADR 0011](docs/adr/0011-policy-as-code-and-budgets.md)) |
+| **Bot identity** | GitHub App: per-job, one-repository, one-hour tokens; commits by `<app>[bot]` ([ADR 0010](docs/adr/0010-github-app-identity.md)) |
+| Secrets | A patch containing a token or key is never packaged; logs, test output and PR bodies are redacted |
+| Prompt injection | Instruction-like content is flagged and raises risk; a blocked action after it stops the job |
+| Bounded autonomy | Fix/re-plan/review rounds, LLM calls, **cost per job**, **time per job**, **daily spend**, loop detection |
+| Routing | An LLM may propose the next step; code decides ([ADR 0008](docs/adr/0008-deterministic-supervisor.md)) |
+| Human approval | Bound to the patch SHA; **approvers list**, **expiry**, **risk level**; requester can't approve (database trigger) |
+| Audit | Append-only `audit_log` (UPDATE/DELETE/TRUNCATE blocked by triggers), with policy version on every block |
 
 ## Project layout
 
@@ -170,7 +176,8 @@ src/coding_agent/
   api/            FastAPI app: job routes, API-key auth, middleware (UI in phase 5)
   worker/         Postgres queue worker: claim, heartbeat, recover, code, publish
   db/             engine, job queue and audit data access
-  observability/  structured logging (tracing/metrics/masking later)
+  governance/     policy file + checks, redaction, injection detection, pricing, risk, GitHub App
+  observability/  structured logging (tracing/metrics later)
   cli.py          `coding-agent` command
   config.py       typed settings from env vars
 evals/sample_repo/  practice repository the agent edits in demos and evals
@@ -185,7 +192,7 @@ docs/             architecture, ADRs, runbook, setup
 - [x] **1 Core loop** — MCP workspace server, single agent, prompt registry, push + PR
 - [x] **2 API + worker** — Postgres job queue, audit logging, restart recovery
 - [x] **3 Multi-agent + retrieval** — planner, coder, tester, reviewer; guarded supervisor; LlamaIndex
-- [ ] **4 Governance** — permissions, guards, approvals, budgets, masking
+- [x] **4 Governance** — GitHub App, policy file, budgets, masking, injection tripwires, approvals
 - [ ] **5 UI + login** — GitHub OAuth, job timeline, approval screen
 - [ ] **6 Evals + observability** — golden tasks, retrieval evals, Langfuse, SLOs
 - [ ] **7 Release** — docs, demo video, `v1.0.0`

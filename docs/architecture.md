@@ -52,11 +52,18 @@ Routing decisions are stored on the job (`routes`) and in the audit log with the
 Limits: `AGENT_MAX_FIX_ATTEMPTS`, `AGENT_MAX_REPLANS`, `AGENT_MAX_REVIEW_ROUNDS`,
 `AGENT_MAX_LLM_TURNS` (per coder run) and `AGENT_MAX_LLM_CALLS` (per job). See ADR 0008 and 0009.
 
+## Governance (phase 4)
+
+Every tool call passes the Toolbox: role allowlist → policy check (`policy@vN#hash`) → loop
+detection → MCP server → redaction and injection scan → audit. Before approval the packager
+rejects patches with secrets or policy violations and assigns a risk level. Credentials come
+from a GitHub App token minted per job for one repository. See ADR 0010 and 0011.
+
 ## Data model
 
 | Table | Purpose | Guarantees |
 |---|---|---|
-| `jobs` | One row per agent job and the work queue; holds plan, review, routes, diff, patch, `diff_sha256`, test output, prompt versions, LLM calls | Status values constrained |
+| `jobs` | One row per agent job and the work queue; holds plan, review, routes, diff, patch, `diff_sha256`, test output, prompt versions, LLM calls, tokens, cost, risk level, policy findings | Status values constrained |
 | `audit_log` | Every tool call, policy block, state change and approval | **Append-only** (triggers) |
 | `approvals` | Human decision bound to the exact diff (`diff_sha256`) | **Approver ≠ requester** (trigger), one per job |
 | `eval_runs` | Golden-task results per model and commit | — |

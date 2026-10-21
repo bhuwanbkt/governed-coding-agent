@@ -61,6 +61,14 @@ class JobDetail(JobSummary):
     )
     routes: list[dict[str, Any]] = Field(description="Routing decisions between agents, with reasons")
     llm_calls: int
+    tokens_in: int
+    tokens_out: int
+    cost_usd: float = Field(description="List-price LLM cost (USD); $0 is billed on a free tier")
+    duration_ms: int | None
+    risk_level: str | None = Field(description="low | medium | high: how carefully to review")
+    policy_findings: list[dict[str, Any]] = Field(
+        description="Injection hits, secrets, policy violations and risk reasons"
+    )
 
 
 class Decision(BaseModel):
@@ -116,7 +124,9 @@ def get_job(job_id: uuid.UUID, _: CurrentUser) -> repo.Job:
 
 @router.post("/{job_id}/decision", response_model=JobDetail)
 def decide(job_id: uuid.UUID, body: Decision, user: CurrentUser) -> repo.Job:
-    """Approve or reject the diff of a job awaiting approval. You can't decide on your own job."""
+    """Approve or reject the diff of a job awaiting approval. You can't decide on your own job,
+    only listed approvers may decide (if APPROVERS is set), and requests expire."""
+    settings = get_settings()
     try:
         return repo.record_decision(
             job_id,
@@ -124,10 +134,12 @@ def decide(job_id: uuid.UUID, body: Decision, user: CurrentUser) -> repo.Job:
             approve=body.decision == "approve",
             diff_sha256=body.diff_sha256,
             comment=body.comment,
+            approvers=settings.approver_set(),
+            ttl_hours=settings.approval_ttl_hours,
         )
     except repo.JobNotFoundError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found") from None
-    except repo.SeparationOfDutiesError as exc:
+    except (repo.SeparationOfDutiesError, repo.NotAnApproverError) as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from None
     except (repo.InvalidJobStateError, repo.DiffMismatchError) as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
