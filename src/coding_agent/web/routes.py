@@ -218,7 +218,7 @@ def submit_job(
         problems = "; ".join(
             f"{'.'.join(map(str, e['loc']))}: {e['msg'].removeprefix('Value error, ')}" for e in exc.errors()
         )
-        return fail(problems, status.HTTP_422_UNPROCESSABLE_ENTITY)
+        return fail(problems, 422)
     if not settings.repo_allowed(body.repo_url):
         return fail("That repository is not on the allowlist.", status.HTTP_403_FORBIDDEN)
     job = repo.create_job(
