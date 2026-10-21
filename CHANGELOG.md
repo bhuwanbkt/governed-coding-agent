@@ -5,6 +5,18 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (phase 5)
+- Web UI at `/ui`: a job list and a new-job form. Each job page shows the plan, review, governance
+  findings, diff with its SHA-256, cost and tokens, and a live timeline. Approvers can approve or
+  reject there.
+- Sign-in with OpenID Connect (Zitadel): Authorization Code with PKCE, state and nonce, and
+  ID-token verification via JWKS. `submitter` and `approver` roles come from the identity
+  provider (ADR 0012).
+- Signed, HttpOnly session cookie; CSRF tokens on every form; strict Content-Security-Policy
+  with no inline scripts and no third-party code.
+- Settings: `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_PROJECT_ID`,
+  `OIDC_ROLES_CLAIM`, `SESSION_SECRET`, `SESSION_MAX_AGE_HOURS`.
+
 ### Fixed
 - A provider error during an agent's turn (e.g. Groq rejecting a malformed tool call) no longer
   crashes the job: the agent is told and retries up to twice, then the job is handed off with

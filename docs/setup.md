@@ -177,6 +177,50 @@ GitHub: the agent no longer needs a person's credentials in production.
 **Check:** run a job. Its audit log starts with a `credentials` event ("GitHub App token for
 bhuwanbkt/agent-sandbox-repo …"), and the pull request is opened by `<app-name>[bot]`.
 
+## 10. Phase 5: web UI and sign-in with Zitadel
+
+### In Zitadel (about 10 minutes)
+
+1. Create a project for this app only (e.g. `governed-coding-agent`). In its settings, tick
+   **Return user roles during authentication** and **Only authorized users can authenticate**,
+   then save.
+2. **Roles:** add the keys `submitter` and `approver` exactly.
+3. **New application:** type **Web**, authentication method **Code**.
+   - Redirect URIs: `https://<your-app>.code.run/auth/callback` and
+     `http://localhost:8080/auth/callback`
+   - Post-logout URI: `https://<your-app>.code.run/ui`
+   - Turn on **Development Mode** so the `http://localhost` URI is accepted.
+   - Copy the Client ID and Client Secret. The secret is shown only once; keep it in a password
+     manager.
+4. Application → **Token Settings:** tick **User roles inside ID Token** and **User Info inside
+   ID Token**.
+5. **Users:** create a second user (e.g. `reviewer`). In the project's **Role Assignments**, give
+   yourself `submitter` and the reviewer `approver`. With different people in each role,
+   separation of duties gets exercised.
+
+### Configure the app
+
+Set these locally in `.env` and in Northflank as secrets:
+
+| Variable | Value |
+|---|---|
+| `OIDC_ISSUER` | Your instance URL, e.g. `https://<instance>.zitadel.cloud` (no trailing slash) |
+| `OIDC_CLIENT_ID` | From the application |
+| `OIDC_CLIENT_SECRET` | From the application |
+| `OIDC_PROJECT_ID` | The project's ID (project page header) |
+| `SESSION_SECRET` | `openssl rand -base64 48`, at least 32 characters, different per environment |
+
+Open `/ui`, sign in, and submit a job as the submitter. Then sign in as the reviewer (use a
+private window) and approve it. The JSON API with `X-API-Key` still works as before.
+
+Troubleshooting:
+
+- **"redirect_uri missing"** in Zitadel: the URI must match exactly, including `https` and
+  `/auth/callback`.
+- **No role badges after sign-in:** check step 4 and the role assignments, then sign out and in
+  again.
+- **"issuer does not match":** remove the trailing slash from `OIDC_ISSUER`.
+
 ## Coming in later phases
 
 | Phase | Setup needed |

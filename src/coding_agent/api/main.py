@@ -1,21 +1,32 @@
-"""FastAPI application entry point: ops endpoints, job API, and (optionally) the embedded worker."""
+"""FastAPI application entry point: ops endpoints, job API, web UI, and (optionally) the embedded worker."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
+import secrets
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 
 from coding_agent.api.jobs import router as jobs_router
 from coding_agent.api.middleware import RequestContextMiddleware
 from coding_agent.config import get_settings
 from coding_agent.db.session import DatabaseNotConfiguredError, ping
 from coding_agent.observability.logging import configure_logging
+from coding_agent.web.oidc import OIDCClient, OIDCConfig
+from coding_agent.web.routes import router as web_router
+from coding_agent.web.security import SecurityHeadersMiddleware
+from coding_agent.web.session import LoginRequiredError
+
+STATIC_DIR = Path(__file__).resolve().parents[1] / "web" / "static"
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +58,40 @@ def create_app() -> FastAPI:
         redoc_url=None,
         lifespan=lifespan,
     )
+    # Middleware runs outermost-last: request context wraps everything, then security headers.
+    app.add_middleware(
+        SessionMiddleware,
+        # Without SESSION_SECRET (dev only; production refuses to start) sessions last until restart.
+        secret_key=(
+            settings.session_secret.get_secret_value()
+            if settings.session_secret is not None
+            else secrets.token_urlsafe(32)
+        ),
+        session_cookie="gca_session",
+        max_age=int(settings.session_max_age_hours * 3600),
+        same_site="lax",
+        https_only=settings.app_env == "production",
+    )
+    app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestContextMiddleware)
     app.include_router(jobs_router)
+    app.include_router(web_router)
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.state.oidc = None
+    if settings.oidc_issuer and settings.oidc_client_id and settings.oidc_client_secret:
+        app.state.oidc = OIDCClient(
+            OIDCConfig(
+                issuer=settings.oidc_issuer,
+                client_id=settings.oidc_client_id,
+                client_secret=settings.oidc_client_secret.get_secret_value(),
+                project_id=settings.oidc_project_id,
+                roles_claim=settings.oidc_roles_claim,
+            )
+        )
+
+    @app.exception_handler(LoginRequiredError)
+    async def login_required(_: Request, exc: LoginRequiredError) -> RedirectResponse:
+        return RedirectResponse(f"/login?{urlencode({'next': exc.next_path})}", status_code=303)
 
     @app.exception_handler(DatabaseNotConfiguredError)
     async def no_database(_: Request, __: DatabaseNotConfiguredError) -> JSONResponse:

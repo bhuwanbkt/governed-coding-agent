@@ -27,6 +27,9 @@ dependencies = [
     # governance (phase 4)
     "pyyaml>=6.0",  # policy file
     "pyjwt[crypto]>=2.9",  # GitHub App authentication (RS256)
+    # web UI (phase 5)
+    "itsdangerous>=2.2",  # signed session cookie (Starlette SessionMiddleware)
+    "python-multipart>=0.0.20",  # HTML form posts
     "pytest>=8.3",  # the agent runs target repositories' tests in production too
 ]
 

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Governed Coding Agent{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/ui">Governed Coding Agent</a>
+    {% if env != "production" %}<span class="badge neutral">{{ env }}</span>{% endif %}
+    <span class="spacer"></span>
+    {% if user %}
+      <span class="who">{{ user.name }}</span>
+      {% for role in user.roles|sort %}<span class="badge role">{{ role }}</span>{% endfor %}
+      <form method="post" action="/logout" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="link" type="submit">Sign out</button>
+      </form>
+    {% endif %}
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block content %}
+{% if error %}<p class="alert bad" role="alert">{{ error }}</p>{% endif %}
+{% if user.can_submit %}
+<section class="card">
+  <h2>New job</h2>
+  <form method="post" action="/ui/jobs" class="grid">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Repository
+      <input name="repo_url" required list="repos" placeholder="https://github.com/owner/repo.git" value="{{ form.repo_url or '' }}">
+      <datalist id="repos">{% for p in repo_prefixes %}<option value="{{ p }}">{% endfor %}</datalist>
+    </label>
+    <label>Base branch <input name="base_branch" value="{{ form.base_branch or 'main' }}"></label>
+    <label class="wide">Task
+      <textarea name="task" required minlength="5" maxlength="4000" rows="3" placeholder="What should the agents change?">{{ form.task or '' }}</textarea>
+    </label>
+    <label>Test command <input name="test_command" value="{{ form.test_command or 'pytest -q' }}"></label>
+    <div class="actions"><button type="submit" class="button">Submit job</button></div>
+  </form>
+</section>
+{% else %}
+<p class="muted">You can view jobs. Ask an administrator for the <b>submitter</b> role to create them.</p>
+{% endif %}
+
+<section class="card">
+  <h2>Jobs</h2>
+  {% if jobs %}
+  <table class="jobs">
+    <thead><tr><th>Status</th><th>Task</th><th>Risk</th><th>By</th><th>Cost</th><th>Created</th></tr></thead>
+    <tbody>
+    {% for job in jobs %}
+      <tr>
+        <td><span class="badge {{ status_tone.get(job.status, 'neutral') }}">{{ job.status.replace('_', ' ') }}</span></td>
+        <td><a href="/ui/jobs/{{ job.id }}">{{ job.task|truncate(90) }}</a><div class="muted small">{{ job.repo_url }}</div></td>
+        <td>{% if job.risk_level %}<span class="badge risk-{{ job.risk_level }}">{{ job.risk_level }}</span>{% endif %}</td>
+        <td>{{ job.requested_by }}</td>
+        <td class="num">${{ '%.4f'|format(job.cost_usd) }}</td>
+        <td class="muted">{{ job.created_at|ago }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">No jobs yet.</p>{% endif %}
+</section>
+{% endblock %}

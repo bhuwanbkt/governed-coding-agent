@@ -77,6 +77,16 @@ class Settings(BaseSettings):
     # "bob,carol": only these users may approve. Empty = anyone except the requester.
     approvers: str = ""
     approval_ttl_hours: float = 24.0  # unanswered approvals expire after this
+
+    # --- web UI + OIDC login (phase 5) --------------------------------------------------
+    # Any OpenID Connect provider (Zitadel, Okta, Entra ID, Keycloak). Unset = UI login disabled.
+    oidc_issuer: str | None = None  # e.g. https://my-instance.zitadel.cloud
+    oidc_client_id: str | None = None
+    oidc_client_secret: SecretStr | None = None
+    oidc_project_id: str | None = None  # Zitadel: adds the project audience scope + roles claim
+    oidc_roles_claim: str | None = None  # other providers: claim holding roles, e.g. "roles"
+    session_secret: SecretStr | None = None  # signs the session cookie; required in production
+    session_max_age_hours: float = 8.0
     git_author_name: str = "governed-coding-agent"
     git_author_email: str = "agent@users.noreply.github.com"
 
@@ -100,6 +110,12 @@ class Settings(BaseSettings):
         "api_keys",
         "github_app_id",
         "github_app_private_key",
+        "oidc_issuer",
+        "oidc_client_id",
+        "oidc_client_secret",
+        "oidc_project_id",
+        "oidc_roles_claim",
+        "session_secret",
         mode="before",
     )
     @classmethod
@@ -126,6 +142,13 @@ class Settings(BaseSettings):
         self.api_users()  # fail fast on a malformed API_KEYS value
         if (self.github_app_id is None) != (self.github_app_private_key is None):
             raise ValueError("set both GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY, or neither")
+        oidc = (self.oidc_issuer, self.oidc_client_id, self.oidc_client_secret)
+        if any(v is not None for v in oidc) and not all(v is not None for v in oidc):
+            raise ValueError("set OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET together, or none")
+        if self.oidc_enabled and self.app_env == "production" and self.session_secret is None:
+            raise ValueError("SESSION_SECRET is required for the web UI in production")
+        if self.session_secret is not None and len(self.session_secret.get_secret_value()) < 32:
+            raise ValueError("SESSION_SECRET must be at least 32 characters")
         if self.max_cost_per_job_usd <= 0 or self.daily_budget_usd <= 0 or self.job_timeout_seconds <= 0:
             raise ValueError("budgets and the job timeout must be positive")
         return self
@@ -135,6 +158,10 @@ class Settings(BaseSettings):
         if self.github_app_private_key is None:
             return None
         return self.github_app_private_key.get_secret_value().replace("\\n", "\n")
+
+    @property
+    def oidc_enabled(self) -> bool:
+        return self.oidc_issuer is not None and self.oidc_client_id is not None
 
     def approver_set(self) -> frozenset[str]:
         return frozenset(a.strip() for a in self.approvers.split(",") if a.strip())
