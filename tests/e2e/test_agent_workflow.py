@@ -413,3 +413,41 @@ def test_model_that_keeps_failing_hands_off_with_a_clear_reason(tmp_path: Path, 
     assert "coder: the model failed 3 times in a row" in str(state["error"])
     assert "tool_use_failed" in str(state["error"])
     assert "ExceptionGroup" not in str(state["error"])
+
+
+class RateLimitError(Exception):
+    status_code = 429
+
+
+class RateLimitedModel:
+    """Says "429 Too Many Requests" a few times (after the SDK's own retries), then answers."""
+
+    def __init__(self, inner: ScriptedChatModel, times: int) -> None:
+        self.inner, self.times = inner, times
+
+    async def ainvoke(self, input: list[Any], /) -> Any:
+        if self.times:
+            self.times -= 1
+            raise RateLimitError("Error code: 429 - rate limit reached for tokens per minute")
+        return await self.inner.ainvoke(input)
+
+
+def test_rate_limits_are_waited_out_without_confusing_the_agent(tmp_path: Path, sample_remote: str) -> None:
+    """Regression (found in production): Groq's free tier returned 429 on most coder calls."""
+    coder = demo_coder()
+    models = ScriptedModels()
+    models.scripts["coder"] = RateLimitedModel(coder, times=2)  # type: ignore[assignment]
+    state = run(tmp_path, sample_remote, models)
+
+    assert state["status"] == "awaiting_approval", state.get("error")
+    # Same request resent after waiting: no "could not be processed" nudge for a rate limit.
+    assert all("could not be processed" not in str(m.content) for m in coder.received[0])
+
+
+def test_persistent_rate_limiting_hands_off(tmp_path: Path, sample_remote: str) -> None:
+    models = ScriptedModels()
+    models.scripts["coder"] = RateLimitedModel(demo_coder(), times=99)  # type: ignore[assignment]
+    state = run(tmp_path, sample_remote, models)
+
+    assert state["status"] == "handed_off"
+    assert "kept rate-limiting" in str(state["error"])

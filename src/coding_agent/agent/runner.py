@@ -194,6 +194,7 @@ async def run_coding_job(
                         max_review_rounds=settings.agent_max_review_rounds,
                         max_replans=settings.agent_max_replans,
                         min_llm_interval_seconds=0.0 if models else settings.llm_min_interval_seconds,
+                        rate_limit_backoff_seconds=0.0 if models else 20.0,
                         supervisor_mode=settings.supervisor_mode,
                     ),
                     provider=settings.llm_provider,
