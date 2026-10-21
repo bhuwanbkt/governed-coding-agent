@@ -27,7 +27,7 @@ import hashlib
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -129,6 +129,30 @@ class AgentDeps:
     limits: AgentLimits
     provider: str | None = None
     policy: Policy | None = None
+    meter: UsageMeter = field(default_factory=lambda: UsageMeter())
+
+
+@dataclass
+class UsageMeter:
+    """LLM usage for one job. Lives outside the graph so it survives a run that ends in an
+    exception (loop detected, time limit), and the job record still shows what was spent."""
+
+    calls: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    prices_per_mtok: tuple[float, float] = (0.0, 0.0)
+
+    @property
+    def cost_usd(self) -> float:
+        return cost_usd(self.tokens_in, self.tokens_out, self.prices_per_mtok)
+
+    def as_state(self) -> dict[str, Any]:
+        return {
+            "llm_calls": self.calls,
+            "tokens_in": self.tokens_in,
+            "tokens_out": self.tokens_out,
+            "cost_usd": round(self.cost_usd, 6),
+        }
 
 
 class BudgetExhaustedError(RuntimeError):
@@ -160,25 +184,20 @@ def _not_reviewed(reason: str) -> dict[str, Any]:
 
 def build_graph(deps: AgentDeps) -> Any:
     toolbox, limits = deps.toolbox, deps.limits
-    calls = 0
+    meter = deps.meter
+    meter.prices_per_mtok = limits.prices_per_mtok
     last_call = 0.0
-    tokens = {"in": 0, "out": 0}
 
     def spent() -> float:
-        return cost_usd(tokens["in"], tokens["out"], limits.prices_per_mtok)
+        return meter.cost_usd
 
     def usage() -> dict[str, Any]:
-        return {
-            "llm_calls": calls,
-            "tokens_in": tokens["in"],
-            "tokens_out": tokens["out"],
-            "cost_usd": round(spent(), 6),
-        }
+        return meter.as_state()
 
     # ------------------------------------------------------------------ LLM plumbing
     async def llm(model: ToolCallingModel, messages: list[BaseMessage]) -> BaseMessage:
-        nonlocal calls, last_call
-        if calls >= limits.max_llm_calls:
+        nonlocal last_call
+        if meter.calls >= limits.max_llm_calls:
             raise BudgetExhaustedError(f"LLM call budget exhausted ({limits.max_llm_calls} calls)")
         if spent() >= limits.max_cost_usd:
             raise BudgetExhaustedError(
@@ -188,11 +207,11 @@ def build_graph(deps: AgentDeps) -> Any:
         if wait > 0:
             await asyncio.sleep(wait)
         last_call = time.monotonic()
-        calls += 1
+        meter.calls += 1
         response = await model.ainvoke(messages)
         metadata = getattr(response, "usage_metadata", None) or {}
-        tokens["in"] += int(metadata.get("input_tokens", 0) or 0)
-        tokens["out"] += int(metadata.get("output_tokens", 0) or 0)
+        meter.tokens_in += int(metadata.get("input_tokens", 0) or 0)
+        meter.tokens_out += int(metadata.get("output_tokens", 0) or 0)
         return response
 
     async def run_agent(role: Role, variables: dict[str, Any], kickoff: str) -> AgentRun:
@@ -307,7 +326,7 @@ def build_graph(deps: AgentDeps) -> Any:
             f"- Fix attempts used: {state.get('fix_attempts', 0)} of {limits.max_fix_attempts}\n"
             f"- Re-plans used: {state.get('replans', 0)} of {limits.max_replans}\n"
             f"- Review rounds used: {state.get('review_rounds', 0)} of {limits.max_review_rounds}\n"
-            f"- LLM calls used: {calls} of {limits.max_llm_calls} (cost ${spent():.4f})\n"
+            f"- LLM calls used: {meter.calls} of {limits.max_llm_calls} (cost ${spent():.4f})\n"
             f"- Tests: {'passing' if passed else 'failing'}\n\n"
             f'<untrusted kind="test-output">\n{tail(state.get("test_output", ""), 15)}\n</untrusted>\n\n'
             f"Review:\n{review_text}"

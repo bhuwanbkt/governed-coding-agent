@@ -27,7 +27,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from coding_agent.governance import injection
-from coding_agent.governance.policy import Policy
+from coding_agent.governance.policy import WRITE_TOOLS, Policy
 from coding_agent.governance.redact import redact, redact_value
 
 logger = logging.getLogger("coding_agent.audit")
@@ -81,6 +81,8 @@ class Toolbox:
     policy: Policy | None = None  # governance policy applied to arguments (phase 4)
     injection_flags: list[str] = field(default_factory=list)
     _call_counts: Counter[str] = field(default_factory=Counter)
+    # Bumped after every successful write, so re-reading a file you just edited isn't a "loop".
+    _workspace_version: int = 0
 
     @classmethod
     @asynccontextmanager
@@ -144,7 +146,11 @@ class Toolbox:
             self._stop_if_injected(actor, str(violation))
             raise PolicyViolationError(f"blocked by policy: {violation}")
 
-        fingerprint = f"{actor}:{name}:{json.dumps(args, sort_keys=True, default=str)}"
+        # Identical call against an unchanged workspace = no progress. Calls after a write
+        # (e.g. reading back the file just edited) get a fresh count.
+        fingerprint = (
+            f"{actor}:{name}:{json.dumps(args, sort_keys=True, default=str)}@{self._workspace_version}"
+        )
         self._call_counts[fingerprint] += 1
         if self._call_counts[fingerprint] > MAX_IDENTICAL_CALLS:
             await self._audit(actor, name, args, allowed=False, result="blocked: loop detected", start=start)
@@ -155,6 +161,8 @@ class Toolbox:
         if getattr(result, "is_error", False):
             text = f"ERROR: {text}"
         await self._audit(actor, name, args, allowed=True, result=text, start=start)
+        if name in WRITE_TOOLS and not text.startswith("ERROR"):
+            self._workspace_version += 1
         if name in injection.SCANNED_TOOLS and (hits := injection.detect(text)):
             where = f"{name}({args.get('path') or args.get('query') or args.get('pattern') or ''})"
             self.injection_flags.extend(f"{where}: {hit}" for hit in hits)
