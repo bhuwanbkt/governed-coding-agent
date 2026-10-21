@@ -7,8 +7,8 @@
   <form method="post" action="/ui/jobs" class="grid">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <label>Repository
-      <input name="repo_url" required list="repos" placeholder="https://github.com/owner/repo.git" value="{{ form.repo_url or '' }}">
-      <datalist id="repos">{% for p in repo_prefixes %}<option value="{{ p }}">{% endfor %}</datalist>
+      <input name="repo_url" required placeholder="https://github.com/owner/repo.git" value="{{ form.repo_url or '' }}">
+      {% if repo_prefixes %}<span class="muted small">Full repository URL. Allowed: {% for p in repo_prefixes %}<code>{{ p }}</code>{% if not loop.last %}, {% endif %}{% endfor %}…</span>{% endif %}
     </label>
     <label>Base branch <input name="base_branch" value="{{ form.base_branch or 'main' }}"></label>
     <label class="wide">Task

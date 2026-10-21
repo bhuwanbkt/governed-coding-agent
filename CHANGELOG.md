@@ -5,6 +5,13 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- A repository URL must name one repository (`https://host/owner/repo`). A bare allowlist prefix
+  such as `https://github.com/owner/` used to be queued and then fail at clone time; it's now
+  refused straight away by the API (422) and the UI, with the reason. URLs with credentials, a
+  query string or extra path segments are refused too.
+- The new-job form no longer suggests bare prefixes; it lists the allowed prefixes as a hint.
+
 ### Added (phase 5)
 - Web UI at `/ui`: a job list and a new-job form. Each job page shows the plan, review, governance
   findings, diff with its SHA-256, cost and tokens, and a live timeline. Approvers can approve or

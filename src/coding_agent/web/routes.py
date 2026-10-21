@@ -215,7 +215,9 @@ def submit_job(
     try:
         body = JobCreate(**form)
     except ValidationError as exc:
-        problems = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors())
+        problems = "; ".join(
+            f"{'.'.join(map(str, e['loc']))}: {e['msg'].removeprefix('Value error, ')}" for e in exc.errors()
+        )
         return fail(problems, status.HTTP_422_UNPROCESSABLE_ENTITY)
     if not settings.repo_allowed(body.repo_url):
         return fail("That repository is not on the allowlist.", status.HTTP_403_FORBIDDEN)

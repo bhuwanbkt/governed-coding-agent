@@ -62,6 +62,13 @@ def test_invalid_body_is_rejected(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+def test_bare_allowlist_prefix_is_not_a_repository(client: TestClient) -> None:
+    body = {**BODY, "repo_url": "https://github.com/bhuwanbkt/"}  # passes the allowlist, isn't a repo
+    response = client.post("/jobs", json=body, headers={"X-API-Key": ALICE_KEY})
+    assert response.status_code == 422
+    assert "one repository" in response.text
+
+
 def test_without_database_the_api_says_so(client: TestClient) -> None:
     response = client.post("/jobs", json=BODY, headers={"X-API-Key": ALICE_KEY})
     assert response.status_code == 503

@@ -292,6 +292,23 @@ def test_submit_without_role_or_outside_allowlist_is_refused(
     assert fake_repo.created == []
 
 
+def test_bare_prefix_is_refused_with_a_clear_message(
+    client: TestClient, app: FastAPI, fake_repo: FakeRepo
+) -> None:
+    sign_in(client, app, "submitter")
+    page = client.get("/ui").text
+    assert "<datalist" not in page  # the form no longer suggests bare prefixes
+    response = client.post(
+        "/ui/jobs",
+        data={"csrf": csrf_from(page), "repo_url": "https://github.com/bhuwanbkt/", "task": "Add a function"},
+    )
+    assert response.status_code == 422
+    assert "must name one repository" in response.text
+    assert "Value error" not in response.text
+    assert 'value="https://github.com/bhuwanbkt/"' in response.text  # the form keeps what was typed
+    assert fake_repo.created == []
+
+
 # --------------------------------------------------------------------------- approving
 def test_requester_sees_no_decision_buttons(client: TestClient, app: FastAPI) -> None:
     sign_in(client, app, "submitter", "approver", name="bhuwan")  # same person who requested
