@@ -5,6 +5,11 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Loop detection no longer stops a coder that re-reads a file after editing it: identical calls
+  are only counted while the workspace is unchanged (found in production, job `32e1226e`).
+- Jobs that stop early (loop detected, time limit) now keep their LLM call, token and cost totals.
+
 ### Added (phase 4)
 - GitHub App authentication: per-job installation tokens limited to one repository and one hour;
   personal token only as a local fallback (ADR 0010).

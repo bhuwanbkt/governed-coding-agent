@@ -255,6 +255,37 @@ def test_loop_detection_hands_off(tmp_path: Path, sample_remote: str) -> None:
 
     assert state["status"] == "handed_off"
     assert "too many times" in str(state["error"])
+    assert state["llm_calls"] == 5  # planner 1 + coder 4: usage survives the early stop
+
+
+def test_rereading_a_file_after_each_edit_is_not_a_loop(tmp_path: Path, sample_remote: str) -> None:
+    """Regression (found in production): the coder read calculator.py after every edit, the 4th
+    identical read_file tripped loop detection and the job was handed off."""
+
+    def edit(n: int) -> AIMessage:
+        return tool_call(
+            "replace_in_file",
+            {"path": "calculator.py", "old": "    return a * b\n", "new": f"    return a * b  # {n}\n"},
+            f"e{n}",
+        )
+
+    read = {"path": "calculator.py"}
+    coder = ScriptedChatModel(
+        [
+            tool_call("read_file", read, "r1"),
+            edit(1),
+            tool_call("read_file", read, "r2"),
+            tool_call("replace_in_file", {"path": "calculator.py", "old": "  # 1\n", "new": "  # 2\n"}, "e2"),
+            tool_call("read_file", read, "r3"),
+            tool_call("replace_in_file", {"path": "calculator.py", "old": "  # 2\n", "new": "  # 3\n"}, "e3"),
+            tool_call("read_file", read, "r4"),
+            AIMessage(content="Edited calculator.py three times."),
+        ]
+    )
+    state = run(tmp_path, sample_remote, ScriptedModels(coder=coder))
+
+    assert state["status"] == "awaiting_approval", state.get("error")
+    assert "# 3" in state["diff"]
 
 
 # --------------------------------------------------------------------------- permissions

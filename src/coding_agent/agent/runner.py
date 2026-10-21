@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from coding_agent.agent.graph import AgentDeps, AgentLimits, AgentState, build_graph
+from coding_agent.agent.graph import AgentDeps, AgentLimits, AgentState, UsageMeter, build_graph
 from coding_agent.agent.llm import ModelProvider, build_models
 from coding_agent.agent.publish import PublishRequest, PublishResult, publish
 from coding_agent.agent.toolbox import AuditSink, InjectionSuspectedError, LoopDetectedError, Toolbox
@@ -153,6 +153,7 @@ async def run_coding_job(
     logger.info("coding started", extra={"repo_url": request.repo_url})
     final: dict[str, Any]
     started = time.monotonic()
+    meter = UsageMeter()
     try:
         policy = _policy(settings)
         github_token = await _github_token(settings, initial["repo_url"], job_id, audit_sink)
@@ -183,6 +184,7 @@ async def run_coding_job(
                     ),
                     provider=settings.llm_provider,
                     policy=policy,
+                    meter=meter,
                 )
             )
             # Handle errors inside the session: once they cross the MCP client's task group
@@ -208,6 +210,7 @@ async def run_coding_job(
         _cleanup(settings, workspace)
         job_id_var.reset(token)
     final["duration_ms"] = int((time.monotonic() - started) * 1000)
+    final.update(meter.as_state())  # also when the run ended in an exception
     for key in ("coder_summary", "test_output", "error"):  # never store or show secrets
         if isinstance(final.get(key), str):
             final[key] = redact(final[key])
