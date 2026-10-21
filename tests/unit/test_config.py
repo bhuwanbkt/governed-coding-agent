@@ -31,3 +31,28 @@ def test_database_url_is_secret_in_repr() -> None:
 def test_production_requires_database_url() -> None:
     with pytest.raises(ValidationError, match="DATABASE_URL is required"):
         Settings(_env_file=None, app_env="production", database_url=None)  # type: ignore[call-arg]
+
+
+OIDC = {"oidc_issuer": "https://idp.example.test", "oidc_client_id": "c1", "oidc_client_secret": "x" * 32}
+PROD = {
+    "app_env": "production",
+    "database_url": "postgresql://u:p@h/db",
+    "allowed_repo_prefixes": "https://x/",
+}
+
+
+def test_oidc_settings_must_be_set_together() -> None:
+    with pytest.raises(ValidationError, match="together"):
+        Settings(_env_file=None, oidc_issuer="https://idp.example.test")  # type: ignore[call-arg]
+    assert Settings(_env_file=None, **OIDC).oidc_enabled  # type: ignore[call-arg]
+    assert not Settings(_env_file=None, oidc_issuer=" ").oidc_enabled  # type: ignore[call-arg]
+
+
+def test_production_ui_needs_a_strong_session_secret() -> None:
+    with pytest.raises(ValidationError, match="SESSION_SECRET is required"):
+        Settings(_env_file=None, **PROD, **OIDC)  # type: ignore[call-arg]
+    with pytest.raises(ValidationError, match="at least 32"):
+        Settings(_env_file=None, **PROD, **OIDC, session_secret="short")  # type: ignore[call-arg]
+    settings = Settings(_env_file=None, **PROD, **OIDC, session_secret="s" * 48)  # type: ignore[call-arg]
+    assert "s" * 48 not in repr(settings)
+    assert "x" * 32 not in repr(settings)

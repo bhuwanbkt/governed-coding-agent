@@ -8,9 +8,9 @@ plans the change, writes the code, runs the tests and reviews the diff, then **w
 human to approve** before it pushes a branch and opens a pull request. Every tool call is
 permission-checked, recorded in an append-only audit log, traced and measured.
 
-> **Status:** Phase 4 — planner, coder, tester and reviewer agents with LlamaIndex code search,
-> governed by a policy file, budgets and a GitHub App identity, behind a job API with human
-> approval. See the [roadmap](#roadmap).
+> **Status:** Phase 5 — planner, coder, tester and reviewer agents with LlamaIndex code search,
+> governed by a policy file, budgets and a GitHub App identity. A job API and a web UI with
+> Zitadel sign-in sit in front, with human approval. See the [roadmap](#roadmap).
 
 ## Architecture
 
@@ -151,6 +151,16 @@ main ─► CI again ─► build image (tag = commit SHA) ─► push to GHCR
 
 Setup steps for Neon, Northflank and GitHub are in [docs/setup.md](docs/setup.md).
 
+### Use the web UI (phase 5)
+
+Open `/ui` and sign in with Zitadel (setup: [docs/setup.md §10](docs/setup.md)).
+
+- **Submitters** create jobs and watch the live timeline.
+- **Approvers** read the plan, the reviewer's findings, the governance findings and the exact
+  diff with its SHA-256, then approve or reject. The requester never sees the approve button for
+  their own job.
+- The UI enforces the same rules as the API ([ADR 0012](docs/adr/0012-web-ui-and-oidc-sign-in.md)).
+
 ## Governance (by design)
 
 | Control | How it's enforced |
@@ -162,6 +172,7 @@ Setup steps for Neon, Northflank and GitHub are in [docs/setup.md](docs/setup.md
 | Prompt injection | Instruction-like content is flagged and raises risk; a blocked action after it stops the job |
 | Bounded autonomy | Fix/re-plan/review rounds, LLM calls, **cost per job**, **time per job**, **daily spend**, loop detection |
 | Routing | An LLM may propose the next step; code decides ([ADR 0008](docs/adr/0008-deterministic-supervisor.md)) |
+| Sign-in & roles | OIDC (Zitadel) with PKCE, nonce and JWKS-verified ID tokens; `submitter`/`approver` roles; CSRF tokens; strict CSP |
 | Human approval | Bound to the patch SHA; **approvers list**, **expiry**, **risk level**; requester can't approve (database trigger) |
 | Audit | Append-only `audit_log` (UPDATE/DELETE/TRUNCATE blocked by triggers), with policy version on every block |
 
@@ -173,7 +184,8 @@ src/coding_agent/
   retrieval/      LlamaIndex chunking, metadata, hybrid BM25 + vector search
   mcp_servers/    workspace server (files, tests, git) and code_index server (search)
   prompts/        versioned prompt templates + registry
-  api/            FastAPI app: job routes, API-key auth, middleware (UI in phase 5)
+  api/            FastAPI app: job routes, API-key auth, middleware
+  web/            UI: OIDC sign-in, session + CSRF, security headers, Jinja2 templates, static
   worker/         Postgres queue worker: claim, heartbeat, recover, code, publish
   db/             engine, job queue and audit data access
   governance/     policy file + checks, redaction, injection detection, pricing, risk, GitHub App
@@ -193,7 +205,7 @@ docs/             architecture, ADRs, runbook, setup
 - [x] **2 API + worker** — Postgres job queue, audit logging, restart recovery
 - [x] **3 Multi-agent + retrieval** — planner, coder, tester, reviewer; guarded supervisor; LlamaIndex
 - [x] **4 Governance** — GitHub App, policy file, budgets, masking, injection tripwires, approvals
-- [ ] **5 UI + login** — GitHub OAuth, job timeline, approval screen
+- [x] **5 UI + login** — Zitadel OIDC sign-in, roles, job timeline, approval screen
 - [ ] **6 Evals + observability** — golden tasks, retrieval evals, Langfuse, SLOs
 - [ ] **7 Release** — docs, demo video, `v1.0.0`
 

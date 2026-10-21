@@ -1,0 +1,12 @@
+<ol class="timeline">
+{% for e in events %}
+  <li class="ev {{ e.type }}{% if e.allowed is false %} blocked{% endif %}">
+    <span class="t">{{ e.time }}</span>
+    <span class="actor">{{ e.actor }}</span>
+    {% if e.tool %}<code>{{ e.tool }}</code>{% if e.target %} <span class="target">{{ e.target }}</span>{% endif %}{% endif %}
+    {% if e.type != "tool_call" or e.allowed is false %}<span class="summary">{{ e.summary }}</span>{% endif %}
+  </li>
+{% else %}
+  <li class="muted">Waiting for a worker…</li>
+{% endfor %}
+</ol>

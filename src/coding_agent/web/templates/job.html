@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}{{ job.task|truncate(40) }} · Governed Coding Agent{% endblock %}
+{% block content %}
+<p><a href="/ui">← All jobs</a></p>
+<section class="card">
+  <div class="row">
+    <span class="badge {{ status_tone.get(job.status, 'neutral') }}">{{ job.status.replace('_', ' ') }}</span>
+    {% if job.risk_level %}<span class="badge risk-{{ job.risk_level }}">risk: {{ job.risk_level }}</span>{% endif %}
+    <span class="muted">requested by {{ job.requested_by }} · {{ job.created_at|ago }}</span>
+  </div>
+  <h1>{{ job.task }}</h1>
+  <p class="muted">{{ job.repo_url }} · base <code>{{ job.base_branch }}</code>{% if job.work_branch %} · branch <code>{{ job.work_branch }}</code>{% endif %}</p>
+  {% if job.pr_url %}<p><a class="button" href="{{ job.pr_url }}" rel="noopener noreferrer">Open pull request</a></p>{% endif %}
+  {% if job.error %}<p class="alert bad">{{ job.error }}</p>{% endif %}
+  {% if error %}<p class="alert bad" role="alert">{{ error }}</p>{% endif %}
+  <dl class="stats">
+    <div><dt>LLM calls</dt><dd>{{ job.llm_calls }}</dd></div>
+    <div><dt>Tokens</dt><dd>{{ job.tokens_in }} in / {{ job.tokens_out }} out</dd></div>
+    <div><dt>Cost (list price)</dt><dd>${{ '%.4f'|format(job.cost_usd) }}</dd></div>
+    <div><dt>Duration</dt><dd>{% if job.duration_ms %}{{ (job.duration_ms / 1000)|round|int }} s{% else %}–{% endif %}</dd></div>
+  </dl>
+</section>
+
+{% if job.policy_findings %}
+<section class="card">
+  <h2>Governance findings</h2>
+  <ul class="findings">
+  {% for f in job.policy_findings %}<li><span class="badge {{ 'bad' if f.kind in ('secret', 'violation', 'injection') else 'warn' }}">{{ f.kind }}</span> {{ f.detail }}</li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<div class="columns">
+  <section class="card">
+    <h2>Plan <span class="muted small">planner agent</span></h2>
+    {% if job.plan %}
+      <p>{{ job.plan.summary }}</p>
+      <ul>{% for f in job.plan.files_to_change %}<li><code>{{ f.path }}</code>: {{ f.change }}</li>{% endfor %}</ul>
+      <ol>{% for s in job.plan.steps %}<li>{{ s }}</li>{% endfor %}</ol>
+      <p><b>Tests:</b> {{ job.plan.test_strategy }}</p>
+      {% if job.plan.risks %}<p><b>Risks:</b> {{ job.plan.risks|join('; ') }}</p>{% endif %}
+    {% else %}<p class="muted">No plan yet.</p>{% endif %}
+  </section>
+  <section class="card">
+    <h2>Review <span class="muted small">reviewer agent, advisory</span></h2>
+    {% if job.review %}
+      <p><span class="badge {{ 'good' if job.review.verdict == 'approve' else 'warn' }}">{{ job.review.verdict.replace('_', ' ') }}</span></p>
+      <p>{{ job.review.summary }}</p>
+      <ul>{% for f in job.review.findings or [] %}<li><span class="badge sev-{{ f.severity }}">{{ f.severity }}</span> <code>{{ f.file }}{% if f.line %}:{{ f.line }}{% endif %}</code> {{ f.issue }}</li>{% endfor %}</ul>
+    {% else %}<p class="muted">Not reviewed yet.</p>{% endif %}
+  </section>
+</div>
+
+{% if job.diff %}
+<section class="card">
+  <h2>Change</h2>
+  <p class="muted small">Patch SHA-256 <code>{{ job.diff_sha256 }}</code>. Approval applies to exactly this patch.</p>
+  <pre class="diff">{% for kind, line in diff %}<span class="{{ kind }}">{{ line }}</span>
+{% endfor %}</pre>
+</section>
+{% endif %}
+
+{% if job.status == "awaiting_approval" %}
+<section class="card decision">
+  <h2>Decision</h2>
+  {% if can_decide %}
+  <form method="post" action="/ui/jobs/{{ job.id }}/decision">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="diff_sha256" value="{{ job.diff_sha256 }}">
+    <label>Comment (optional)<textarea name="comment" rows="2" maxlength="2000"></textarea></label>
+    <div class="actions">
+      <button class="button good" type="submit" name="decision" value="approve">Approve and publish</button>
+      <button class="button bad" type="submit" name="decision" value="reject">Reject</button>
+    </div>
+  </form>
+  {% elif own_job %}
+  <p class="muted">You requested this change, so someone else has to approve it (separation of duties).</p>
+  {% else %}
+  <p class="muted">Waiting for an approver. Your account doesn't have the approver role.</p>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Timeline {% if active %}<span class="badge info live">live</span>{% endif %}</h2>
+  <div {% if active %}data-poll="/ui/jobs/{{ job.id }}/timeline" data-every="3000" data-reload-on-stop="1"{% endif %}>
+    {% include "_timeline.html" %}
+  </div>
+</section>
+{% endblock %}
