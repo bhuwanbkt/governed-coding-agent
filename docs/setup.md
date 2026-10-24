@@ -249,4 +249,4 @@ Run a job; its page shows **Trace in Langfuse**.
 
 | Phase | Setup needed |
 |---|---|
-| 6b | `GROQ_API_KEY` as a GitHub secret for the on-demand live eval workflow |
+| 6b | `GROQ_API_KEY` as a GitHub secret for the on-demand live eval workflow (see docs/evals.md) |

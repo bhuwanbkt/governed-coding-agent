@@ -177,3 +177,19 @@ def test_langfuse_keys_must_be_set_together() -> None:
 def test_langfuse_url_accepts_both_names(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     monkeypatch.setenv(name, "https://us.cloud.langfuse.com")
     assert Settings(_env_file=None).langfuse_base_url == "https://us.cloud.langfuse.com"  # type: ignore[call-arg]
+
+
+def test_generation_input_keeps_prompt_task_and_recent_turns() -> None:
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+    from coding_agent.agent.graph import TRACE_RECENT_MESSAGES, _trace_messages
+
+    history = [SystemMessage("system"), HumanMessage("task")] + [AIMessage(f"turn {i}") for i in range(20)]
+    traced = _trace_messages(history)
+    assert [m["content"] for m in traced[:2]] == ["system", "task"]
+    assert traced[2] == {
+        "role": "note",
+        "content": f"... {20 - TRACE_RECENT_MESSAGES} earlier message(s) omitted",
+    }
+    assert traced[-1]["content"] == "turn 19" and len(traced) == 3 + TRACE_RECENT_MESSAGES
+    assert len(_trace_messages(history[:5])) == 5  # short conversations are sent whole

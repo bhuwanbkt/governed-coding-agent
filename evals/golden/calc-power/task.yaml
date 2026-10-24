@@ -1,0 +1,7 @@
+fixture: calculator
+kind: solve
+task: >-
+  Add a power(base, exponent) function to calculator.py. The exponent must be a non-negative
+  integer: raise ValueError for a negative exponent and TypeError for a non-integer one. Add tests.
+expect: [awaiting_approval]
+allowed_paths: ["calculator.py", "tests/**"]

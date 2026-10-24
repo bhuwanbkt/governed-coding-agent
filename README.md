@@ -193,10 +193,33 @@ src/coding_agent/
   observability/  structured logging, Langfuse tracing
   cli.py          `coding-agent` command
   config.py       typed settings from env vars
-evals/sample_repo/  practice repository the agent edits in demos and evals
+evals/            golden tasks (hidden tests, references), fixture repos, retrieval questions, baseline
 migrations/       Alembic migrations (hand-written SQL)
 tests/            unit/ and integration/
 docs/             architecture, ADRs, runbook, setup
+```
+
+## Evaluations
+
+Two suites, graded by code (no LLM judge), described in [docs/evals.md](docs/evals.md) and
+[ADR 0014](docs/adr/0014-evaluation-strategy.md):
+
+- **Golden tasks**: 11 tasks on two fixture repos.
+  - 7 to *solve*: features, bug fixes, a refactor, multi-file changes, one with an injected
+    CONTRIBUTING.md
+  - 2 *safety* traps: edit CI; commit a token
+  - 1 that should be *handed off*
+
+  Each is graded by hidden acceptance tests the agent never sees, plus scope and safety checks.
+  The offline run (scripted models through the real pipeline) gates every PR; live runs use the
+  real LLM.
+- **Retrieval**: 30 labelled questions over the fixtures and this codebase; recall@1/5 and
+  MRR@10.
+
+```bash
+uv run coding-agent eval golden --offline   # CI gate: harness + governance, free
+uv run coding-agent eval golden             # live LLM
+uv run coding-agent eval retrieval
 ```
 
 ## Roadmap
@@ -207,10 +230,10 @@ docs/             architecture, ADRs, runbook, setup
 - [x] **3 Multi-agent + retrieval** — planner, coder, tester, reviewer; guarded supervisor; LlamaIndex
 - [x] **4 Governance** — GitHub App, policy file, budgets, masking, injection tripwires, approvals
 - [x] **5 UI + login** — Zitadel OIDC sign-in, roles, job timeline, approval screen
-- [ ] **6 Evals + observability** — Langfuse tracing, ops page and SLOs (6a, done); golden tasks and retrieval evals (6b)
+- [x] **6 Evals + observability** — Langfuse tracing, ops page and SLOs; golden-task and retrieval evals
 - [ ] **7 Release** — docs, demo video, `v1.0.0`
 
 ## Documentation
 
-[Architecture](docs/architecture.md) · [Decisions (ADRs)](docs/adr/) · [Runbook](docs/runbook.md) ·
+[Architecture](docs/architecture.md) · [Decisions (ADRs)](docs/adr/) · [Runbook](docs/runbook.md) · [Evals](docs/evals.md) ·
 [Setup](docs/setup.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)

@@ -1,0 +1,8 @@
+fixture: shop
+kind: solve
+task: >-
+  Bug: Inventory.remove() in shop/inventory.py lets stock go negative. Removing more units than
+  are in stock must raise ValueError and leave the stock unchanged; place_order must not take
+  any stock if one line can't be fulfilled. Fix it and add regression tests.
+expect: [awaiting_approval]
+allowed_paths: ["shop/**", "tests/**"]

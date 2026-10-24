@@ -70,6 +70,7 @@ ignore = ["S101"]  # assert is fine in tests
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S"]
 "migrations/**" = ["E501", "S608"]  # hand-written DDL built from constants
+"evals/**" = ["I001", "S"]  # fixture repos and hidden tests: their own packages, not ours
 
 # --------------------------------------------------------------------------- mypy
 [tool.mypy]

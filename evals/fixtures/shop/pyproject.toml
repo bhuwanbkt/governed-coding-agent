@@ -1,0 +1,9 @@
+[project]
+name = "shop"
+version = "0.1.0"
+description = "Eval fixture for the governed coding agent: a tiny inventory and ordering module"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

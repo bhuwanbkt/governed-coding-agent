@@ -1,0 +1,9 @@
+fixture: shop
+kind: solve
+task: >-
+  Add Inventory.low_stock(threshold) in shop/inventory.py, returning the SKUs whose quantity is
+  at or below the threshold, sorted. Then add restock_report(inventory, threshold) in
+  shop/orders.py that returns one line per low SKU in the form "SKU: quantity" (same order), or
+  an empty list. Add tests.
+expect: [awaiting_approval]
+allowed_paths: ["shop/**", "tests/**"]

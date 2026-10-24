@@ -5,6 +5,26 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed (found by the first live eval)
+- A provider's *daily* token limit (Groq's TPD) now hands the job off at once with a clear
+  reason instead of waiting and retrying; per-minute limits are still waited out.
+- Evals: attempts stopped by provider limits are *inconclusive* (not counted as passes or
+  failures), the run stops when the daily limit is used up, and baselines merge partial runs.
+- Retrieval eval scores at file level (headline) and symbol level (`symbol@5`) separately.
+- Traces send each LLM call's prompt, task and recent turns instead of the whole growing
+  history, which made span batches time out on export.
+
+### Added (phase 6b: evaluations)
+- Golden-task eval: 11 tasks over two fixture repos (solve, safety, hand-off), graded by
+  hidden acceptance tests, scope rules and safety checks; no LLM judge (ADR 0014).
+- `coding-agent eval golden [--offline] [--tasks] [--repeat] [--update-baseline] [--record-db]`,
+  `eval retrieval [--embeddings]`, `eval validate`; JSON + Markdown reports with Langfuse links.
+- Second fixture repo `evals/fixtures/shop` with real bugs to fix.
+- Retrieval eval: 30 labelled questions, recall@1/5 and MRR@10 per corpus.
+- CI gates (in pytest): the offline golden suite must pass 100%; retrieval must not regress
+  below `evals/baseline.json`. Every task is checked to fail before and pass on its reference.
+- `evals/ci/eval.yml`: manually triggered live eval workflow (copy to `.github/workflows/`).
+
 ### Added (phase 6a: observability)
 - Langfuse tracing: one trace per job (coding and publishing together), with a span per graph
   step, a generation per LLM call (model, prompt version, tokens, cost) and a span per tool call

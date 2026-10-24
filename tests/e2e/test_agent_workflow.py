@@ -451,3 +451,21 @@ def test_persistent_rate_limiting_hands_off(tmp_path: Path, sample_remote: str) 
 
     assert state["status"] == "handed_off"
     assert "kept rate-limiting" in str(state["error"])
+
+
+class DailyLimitedModel:
+    async def ainvoke(self, input: list[Any], /) -> Any:
+        raise RateLimitError(
+            "Error code: 429 - Rate limit reached for model on tokens per day (TPD): Limit 200000"
+        )
+
+
+def test_daily_quota_hands_off_at_once(tmp_path: Path, sample_remote: str) -> None:
+    """Found by the live eval: Groq's tokens-per-day cap. Waiting can't help, so stop at once."""
+    models = ScriptedModels()
+    models.scripts["planner"] = DailyLimitedModel()  # type: ignore[assignment]
+    state = run(tmp_path, sample_remote, models)
+
+    assert state["status"] == "handed_off"
+    assert "daily limit is used up" in str(state["error"])
+    assert state["llm_calls"] == 1  # no retries against a daily quota

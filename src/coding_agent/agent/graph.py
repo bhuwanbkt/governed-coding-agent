@@ -167,6 +167,14 @@ def is_rate_limit(exc: BaseException) -> bool:
     return getattr(exc, "status_code", None) == 429 or "RateLimit" in type(exc).__name__
 
 
+_DAILY_LIMIT = re.compile(r"per day|\(TPD\)|\(RPD\)|daily", re.IGNORECASE)
+
+
+def is_daily_limit(exc: BaseException) -> bool:
+    """A 429 for a per-day quota (e.g. Groq's tokens per day): waiting seconds won't help."""
+    return is_rate_limit(exc) and bool(_DAILY_LIMIT.search(str(exc)))
+
+
 class AgentLLMError(RuntimeError):
     """The model kept failing (e.g. the provider rejected malformed tool calls)."""
 
@@ -272,6 +280,12 @@ def build_graph(deps: AgentDeps) -> Any:
                 raise
             except Exception as exc:
                 reason = " ".join(f"{type(exc).__name__}: {exc}".split())[:300]
+                if is_daily_limit(exc):
+                    await toolbox.record(role.name, "system", f"daily limit: {reason}", allowed=False)
+                    raise AgentLLMError(
+                        f"{role.name}: the LLM provider's daily limit is used up; try again after it "
+                        f"resets ({reason})"
+                    ) from exc
                 if is_rate_limit(exc):
                     # Free tiers cap tokens per minute: wait and resend the same request.
                     rate_limit_waits += 1
@@ -708,15 +722,26 @@ _STEP_KEYS = (
 )
 
 
+TRACE_RECENT_MESSAGES = 6  # per generation; earlier turns are in the previous generations
+
+
 def _trace_messages(messages: list[BaseMessage]) -> list[dict[str, Any]]:
-    """Chat history in a compact form for the trace (masking and size limits apply later)."""
-    out: list[dict[str, Any]] = []
-    for message in messages:
-        item: dict[str, Any] = {"role": message.type, "content": message_text(message)}
+    """What the model saw, compactly: the first two messages (system prompt, task) and the most
+    recent turns. Sending the whole history on every call made each span grow with the
+    conversation, and large batches timed out on export (found in a live eval run)."""
+
+    def item(message: BaseMessage) -> dict[str, Any]:
+        entry: dict[str, Any] = {"role": message.type, "content": message_text(message)}
         if isinstance(message, AIMessage) and message.tool_calls:
-            item["tool_calls"] = [{"name": c["name"], "args": c["args"]} for c in message.tool_calls]
-        out.append(item)
-    return out
+            entry["tool_calls"] = [{"name": c["name"], "args": c["args"]} for c in message.tool_calls]
+        return entry
+
+    head, rest = messages[:2], messages[2:]
+    recent = rest[-TRACE_RECENT_MESSAGES:]
+    out = [item(m) for m in head]
+    if skipped := len(rest) - len(recent):
+        out.append({"role": "note", "content": f"... {skipped} earlier message(s) omitted"})
+    return out + [item(m) for m in recent]
 
 
 def _trace_reply(message: BaseMessage) -> dict[str, Any]:

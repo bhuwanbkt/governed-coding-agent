@@ -3,6 +3,7 @@
 coding-agent run --repo <url> --task "..."   one job in this terminal, with a terminal approval
 coding-agent worker                          process jobs from the Postgres queue (phase 2)
 coding-agent trace-check                     send one test trace to Langfuse and print its link
+coding-agent eval golden|retrieval|validate  evaluations (docs/evals.md)
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import logging
 import sys
 
 from coding_agent.agent.graph import tail
@@ -37,6 +39,22 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
     )
     sub.add_parser("worker", help="process queued and approved jobs from the database")
     sub.add_parser("trace-check", help="send one test trace to Langfuse and print its link")
+    evals = sub.add_parser("eval", help="run an evaluation suite (see docs/evals.md)")
+    suites = evals.add_subparsers(dest="suite", required=True)
+    golden = suites.add_parser("golden", help="golden coding tasks with hidden acceptance tests")
+    golden.add_argument(
+        "--offline", action="store_true", help="scripted models replay reference solutions (no LLM)"
+    )
+    golden.add_argument("--tasks", help="comma-separated task ids (default: all)")
+    golden.add_argument("--repeat", type=int, default=1, help="attempts per task (default 1)")
+    golden.add_argument("--update-baseline", action="store_true", help="save this run as the baseline")
+    golden.add_argument("--record-db", action="store_true", help="also store results in eval_runs")
+    golden.add_argument("--verbose", action="store_true", help="show the agent's log lines")
+    retrieval = suites.add_parser("retrieval", help="code search quality: recall@k and MRR")
+    retrieval.add_argument("--embeddings", action="store_true", help="hybrid search (downloads a model)")
+    retrieval.add_argument("--update-baseline", action="store_true", help="save this run as the baseline")
+    validate = suites.add_parser("validate", help="check that hidden tests fail before and pass after")
+    validate.add_argument("--tasks", help="comma-separated task ids (default: all)")
     return parser.parse_args(argv)
 
 
@@ -130,7 +148,37 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "trace-check":
         return _trace_check()
+    if args.command == "eval":
+        return _eval(args)
     return asyncio.run(_run_interactive(args))
+
+
+def _eval(args: argparse.Namespace) -> int:
+    from coding_agent.evals import runner
+
+    settings = get_settings()
+    if not getattr(args, "verbose", False):  # the eval prints its own progress; job logs are noise
+        logging.getLogger().setLevel(logging.WARNING)
+    ids = [t.strip() for t in args.tasks.split(",") if t.strip()] if getattr(args, "tasks", None) else None
+    if args.suite == "validate":
+        return runner.validate_all(ids)
+    if args.suite == "retrieval":
+        return runner.run_retrieval(
+            settings, embeddings=args.embeddings, update_baseline=args.update_baseline
+        )
+    if args.repeat < 1:
+        print("--repeat must be at least 1")
+        return 2
+    return asyncio.run(
+        runner.run_golden(
+            settings,
+            offline=args.offline,
+            ids=ids,
+            repeat=args.repeat,
+            update_baseline=args.update_baseline,
+            record_db=args.record_db,
+        )
+    )
 
 
 def _trace_check() -> int:

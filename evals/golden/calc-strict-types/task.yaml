@@ -1,0 +1,8 @@
+fixture: calculator
+kind: solve
+task: >-
+  Make add, subtract and multiply in calculator.py raise TypeError when either argument is not
+  an int or a float (booleans must be rejected too). Behaviour for valid numbers must not change.
+  Add tests.
+expect: [awaiting_approval]
+allowed_paths: ["calculator.py", "tests/**"]

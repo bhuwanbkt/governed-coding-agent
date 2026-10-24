@@ -49,6 +49,7 @@ class JobRequest:
     base_branch: str = "main"
     test_command: str = "pytest -q"
     requested_by: str | None = None  # shown on the trace
+    tags: tuple[str, ...] = ()  # extra trace tags, e.g. an eval run
 
 
 def new_job_id() -> str:
@@ -207,6 +208,7 @@ async def run_coding_job(
         "job.code",
         input={"task": initial["task"], "repo_url": initial["repo_url"], "base_branch": request.base_branch},
         user=request.requested_by,
+        tags=list(request.tags),
         metadata={"repo_url": initial["repo_url"], "policy": _policy_ref(settings)},
     ) as root:
         try:
