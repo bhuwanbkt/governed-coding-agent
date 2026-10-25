@@ -11,6 +11,9 @@ versions follow [Semantic Versioning](https://semver.org/).
 - Evals: attempts stopped by provider limits are *inconclusive* (not counted as passes or
   failures), the run stops when the daily limit is used up, and baselines merge partial runs.
 - Retrieval eval scores at file level (headline) and symbol level (`symbol@5`) separately.
+- Text files (Markdown, YAML, TOML) are chunked by a small paragraph splitter instead of
+  LlamaIndex's SentenceSplitter, whose NLTK data newer NLTK refuses to open when uv installs
+  packages as hard links (CI on Linux failed).
 - Traces send each LLM call's prompt, task and recent turns instead of the whole growing
   history, which made span batches time out on export.
 

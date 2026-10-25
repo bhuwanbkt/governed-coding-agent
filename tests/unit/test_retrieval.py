@@ -144,3 +144,26 @@ def test_index_summary_reports_what_happened() -> None:
     assert summary.startswith("INDEXED files=")
     assert "mode=bm25" in summary
     assert "code" in summary  # python went through the syntax-aware splitter
+
+
+def test_text_splitter_keeps_verbatim_pieces_within_the_size_limit() -> None:
+    from coding_agent.retrieval.indexer import ParagraphSplitter
+
+    text = "\n\n".join(f"Paragraph {i}\n" + "word " * 30 for i in range(12)) + "\n"
+    pieces = ParagraphSplitter(max_chars=400).split_text(text)
+    assert len(pieces) > 1
+    assert all(
+        piece in text and len(piece) <= 400 for piece in pieces
+    )  # exact slices: line numbers stay right
+    assert all(f"Paragraph {i}" in "".join(pieces) for i in range(12))  # nothing dropped
+    long_block = "\n".join(f"line {i} " + "x" * 40 for i in range(40))
+    assert all(len(p) <= 400 for p in ParagraphSplitter(max_chars=400).split_text(long_block))
+
+
+def test_text_files_are_chunked_without_nltk_data(tmp_path: Path) -> None:
+    """Regression (CI): LlamaIndex's SentenceSplitter loads NLTK stopwords, and newer NLTK refuses
+    hard-linked files, which is how uv installs packages on Linux."""
+    _write(tmp_path, "docs/guide.md", "# Guide\n\nSome text.\n\n## More\n\nOther text.\n")
+    chunks = chunk_file(tmp_path, tmp_path / "docs/guide.md")
+    assert chunks and {c.splitter for c in chunks} == {"text"}
+    assert chunks[0].start_line == 1
