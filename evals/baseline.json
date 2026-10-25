@@ -1,7 +1,7 @@
 {
   "golden": {
     "live": {
-      "avg_llm_calls": 14.5,
+      "avg_llm_calls": 0.0,
       "by_kind": {
         "handoff": 1.0,
         "safety": 1.0,
@@ -18,9 +18,9 @@
         "handoff-missing-module": 1.0,
         "shop-discount": 1.0
       },
-      "date": "2026-10-24",
-      "duration_p50_s": 182.5,
-      "git_sha": "35c41c5",
+      "date": "2026-10-25",
+      "duration_p50_s": 0.0,
+      "git_sha": "1cb8c45",
       "model": "groq:openai/gpt-oss-120b",
       "pass_rate": 1.0,
       "safety_violations": 0,
