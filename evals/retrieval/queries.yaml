@@ -1,0 +1,37 @@
+# Retrieval eval: questions an agent asks while planning, and where the answer lives.
+# A query is a hit at rank k when a top-k result is in one of the expected files (and contains the
+# expected symbol, when one is given). Corpora:
+#   calculator -> evals/sample_repo, shop -> evals/fixtures/shop, project -> src/coding_agent
+queries:
+  # --- small fixtures: where would a change go?
+  - {corpus: calculator, query: multiply two numbers, expect: [calculator.py], symbol: multiply}
+  - {corpus: calculator, query: tests for subtraction, expect: [tests/test_calculator.py]}
+  - {corpus: shop, query: take units out of stock when an order ships, expect: [shop/inventory.py], symbol: remove}
+  - {corpus: shop, query: percentage discount code applied to the order total, expect: [shop/pricing.py], symbol: order_total}
+  - {corpus: shop, query: place an order and charge the customer, expect: [shop/orders.py], symbol: place_order}
+  - {corpus: shop, query: price of a single SKU, expect: [shop/pricing.py], symbol: unit_price}
+  - {corpus: shop, query: tests for unknown discount codes, expect: [tests/test_orders.py]}
+  # --- this project: questions about its own code
+  - {corpus: project, query: requester cannot approve their own job separation of duties, expect: [db/jobs.py], symbol: record_decision}
+  - {corpus: project, query: approval requests that expire after the time limit, expect: [db/jobs.py], symbol: expire_stale_approvals}
+  - {corpus: project, query: claim the next queued job without two workers getting it, expect: [db/jobs.py], symbol: claim_next}
+  - {corpus: project, query: how much was spent on LLM calls today, expect: [db/jobs.py, db/ops.py]}
+  - {corpus: project, query: redact secrets and email addresses before logging, expect: [governance/redact.py], symbol: redact}
+  - {corpus: project, query: detect prompt injection in file contents, expect: [governance/injection.py], symbol: detect}
+  - {corpus: project, query: protected paths agents may never write, expect: [governance/policy.py, governance/policies/default.yaml]}
+  - {corpus: project, query: risk level of a change for the human approver, expect: [governance/risk.py], symbol: assess}
+  - {corpus: project, query: mint a GitHub App installation token for one repository, expect: [governance/github_app.py], symbol: installation_token}
+  - {corpus: project, query: stop an agent that repeats the same tool call, expect: [agent/toolbox.py]}
+  - {corpus: project, query: wait and retry when the LLM provider rate limits, expect: [agent/graph.py]}
+  - {corpus: project, query: refuse to apply a patch whose sha256 differs from the approved one, expect: [mcp_servers/workspace_server.py], symbol: apply_patch}
+  - {corpus: project, query: open a pull request after approval, expect: [agent/publish.py, mcp_servers/workspace_server.py]}
+  - {corpus: project, query: verify the OIDC ID token signature issuer audience and nonce, expect: [web/oidc.py]}
+  - {corpus: project, query: PKCE code challenge for sign-in, expect: [web/oidc.py], symbol: pkce_challenge}
+  - {corpus: project, query: CSRF token check on form posts, expect: [web/session.py], symbol: check_csrf}
+  - {corpus: project, query: content security policy headers for the HTML pages, expect: [web/security.py]}
+  - {corpus: project, query: merge keyword and vector search rankings, expect: [retrieval/search.py], symbol: reciprocal_rank_fusion}
+  - {corpus: project, query: split source files into chunks by syntax, expect: [retrieval/indexer.py]}
+  - {corpus: project, query: Langfuse trace id derived from the job id, expect: [observability/tracing.py]}
+  - {corpus: project, query: evaluate SLOs for job duration and queue wait, expect: [db/ops.py], symbol: evaluate_slos}
+  - {corpus: project, query: recover jobs whose worker stopped sending heartbeats, expect: [db/jobs.py, worker/main.py]}
+  - {corpus: project, query: list price cost of tokens per model, expect: [governance/pricing.py]}

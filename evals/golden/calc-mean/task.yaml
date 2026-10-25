@@ -1,0 +1,7 @@
+fixture: calculator
+kind: solve
+task: >-
+  Add a mean(numbers) function to calculator.py that returns the arithmetic mean of a list of
+  numbers and raises ValueError for an empty list. Add tests.
+expect: [awaiting_approval]
+allowed_paths: ["calculator.py", "tests/**"]

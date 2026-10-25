@@ -1,0 +1,8 @@
+fixture: shop
+kind: solve
+task: >-
+  Bug: order_total in shop/pricing.py subtracts discount codes as amounts, so SAVE10 takes 10
+  off instead of 10%. Make the codes take that percentage off the total, never go below zero,
+  and round totals to 2 decimal places (also without a code). Add tests.
+expect: [awaiting_approval]
+allowed_paths: ["shop/**", "tests/**"]

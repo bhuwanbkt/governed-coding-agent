@@ -34,3 +34,6 @@ workspaces/
 
 # Files delivered by Claude (not part of the project)
 Claude outputs/
+
+# Eval reports (keep the baseline, not individual runs)
+evals/reports/

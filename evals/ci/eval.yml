@@ -1,0 +1,51 @@
+# Live golden-task eval against the real LLM, started by hand from the Actions tab.
+# Copy to .github/workflows/eval.yml. Needs the repository secret GROQ_API_KEY
+# (optional: LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_BASE_URL to trace the run).
+name: Eval (live)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tasks:
+        description: "Comma-separated task ids (empty = all)"
+        required: false
+        default: ""
+      repeat:
+        description: "Attempts per task"
+        required: false
+        default: "1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eval-live
+  cancel-in-progress: false
+
+jobs:
+  golden:
+    name: Golden tasks (live LLM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+      LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
+      APP_ENV: test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with: { enable-cache: true }
+      - run: uv sync --locked
+      - name: Run the golden tasks
+        env:  # inputs go through env, never straight into the script
+          TASKS: ${{ inputs.tasks }}
+          REPEAT: ${{ inputs.repeat }}
+        run: |
+          args=(--repeat "$REPEAT")
+          if [ -n "$TASKS" ]; then args+=(--tasks "$TASKS"); fi
+          uv run coding-agent eval golden "${args[@]}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with: { name: eval-report, path: evals/reports/ }

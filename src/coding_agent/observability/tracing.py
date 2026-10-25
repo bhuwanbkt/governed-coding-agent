@@ -269,6 +269,9 @@ def configure(settings: Settings) -> Tracer:
                 environment=settings.app_env,
                 release=settings.app_version,
                 sample_rate=settings.langfuse_sample_rate,
+                # The SDK's default 5 s was too short for span batches from long jobs over a slow
+                # link ("Failed to export spans batch due to timeout" in live eval runs).
+                timeout=30,
                 mask=cast(Any, _langfuse_mask),
             )
             _tracer = LangfuseTracer(

@@ -48,6 +48,7 @@ def configure_logging(level: str = "INFO") -> None:
     root.setLevel(level)
     # uvicorn's own access log duplicates our request log line.
     logging.getLogger("uvicorn.access").disabled = True
+    logging.getLogger("bm25s").disabled = True  # logs every index build at DEBUG, resets its own level
     for name in ("uvicorn", "uvicorn.error"):
         logging.getLogger(name).handlers[:] = []
         logging.getLogger(name).propagate = True

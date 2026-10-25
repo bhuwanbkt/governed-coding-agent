@@ -164,10 +164,56 @@ def _code_splitter(language: str) -> Any:
     return CodeSplitter(language=language, chunk_lines=40, chunk_lines_overlap=10, max_chars=1500)
 
 
-def _text_splitter() -> Any:
-    from llama_index.core.node_parser import SentenceSplitter
+TEXT_CHUNK_CHARS = 1500
 
-    return SentenceSplitter(chunk_size=400, chunk_overlap=40)
+
+class ParagraphSplitter:
+    """Splits prose and config files on blank lines, packing paragraphs into chunks of at most
+    TEXT_CHUNK_CHARS (a longer paragraph is split by lines). Pieces are verbatim slices of the
+    file, so line numbers stay exact.
+
+    Replaces LlamaIndex's SentenceSplitter, which loads NLTK data from site-packages; newer NLTK
+    refuses to open hard-linked files, and uv installs packages as hard links on Linux (CI broke)."""
+
+    def __init__(self, max_chars: int = TEXT_CHUNK_CHARS) -> None:
+        self.max_chars = max_chars
+
+    def _spans(self, text: str) -> list[tuple[int, int]]:
+        """(start, end) of each paragraph; paragraphs longer than max_chars split by lines."""
+        spans: list[tuple[int, int]] = []
+        for match in re.finditer(r"\S(?:.|\n(?![ \t]*\n))*", text):
+            start, end = match.span()
+            if end - start <= self.max_chars:
+                spans.append((start, end))
+                continue
+            piece_start = start
+            for line in re.finditer(r"[^\n]*\n?", text[start:end]):
+                line_end = start + line.end()
+                if line_end - piece_start > self.max_chars and start + line.start() > piece_start:
+                    spans.append((piece_start, start + line.start()))
+                    piece_start = start + line.start()
+            if piece_start < end:
+                spans.append((piece_start, end))
+        return spans
+
+    def split_text(self, text: str) -> list[str]:
+        chunks: list[str] = []
+        first: int | None = None
+        last = 0
+        for start, end in self._spans(text):
+            if first is not None and end - first > self.max_chars:
+                chunks.append(text[first:last])
+                first = None
+            if first is None:
+                first = start
+            last = end
+        if first is not None:
+            chunks.append(text[first:last])
+        return [c for c in chunks if c.strip()]
+
+
+def _text_splitter() -> ParagraphSplitter:
+    return ParagraphSplitter()
 
 
 def split_text(text: str, language: str) -> tuple[list[str], str]:

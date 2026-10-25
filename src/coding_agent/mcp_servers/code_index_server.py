@@ -23,6 +23,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 from coding_agent.retrieval.search import CodeIndex, format_hits, load_embed_model
 
 logger = logging.getLogger(__name__)
+# bm25s logs every index build at DEBUG and resets its own level when it loads: switch it off.
+logging.getLogger("bm25s").disabled = True
 server = MCPServer("code_index")
 
 MAX_K = 15
