@@ -71,6 +71,19 @@ def test_installation_token_is_scoped_to_one_repo() -> None:
     assert set(body["permissions"]) == {"contents", "pull_requests", "metadata"}
 
 
+def test_coding_runs_get_a_read_only_token() -> None:
+    seen: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 77})
+        return httpx.Response(201, json={"token": "ghs_test", "expires_at": "2026-10-21T01:00:00Z"})
+
+    installation_token("12345", PEM, REPO, write=False, client=_client(httpx.MockTransport(handle)))
+    assert json.loads(seen[1].content)["permissions"] == {"contents": "read", "metadata": "read"}
+
+
 def test_app_not_installed_is_a_clear_error() -> None:
     transport = httpx.MockTransport(lambda request: httpx.Response(404))
     with pytest.raises(GitHubAppError, match="not installed"):

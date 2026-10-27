@@ -1,6 +1,6 @@
 [project]
 name = "governed-coding-agent"
-version = "0.1.0"
+version = "1.0.0"
 description = "Governed multi-agent coding agent: plans, writes, tests and reviews code, then opens a PR after human approval."
 readme = "README.md"
 requires-python = ">=3.12"

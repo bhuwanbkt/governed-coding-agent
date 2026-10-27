@@ -54,7 +54,11 @@ Check `GET /jobs/{id}` (status, `error`, `attempts`) and `GET /jobs/{id}/audit` 
 - **Search quality is poor or `index_summary` says unavailable:** check the `indexer` tool call in
   the audit log. With `RETRIEVAL_EMBEDDINGS=true`, a model that can't load falls back to BM25
   ("embeddings unavailable"); watch memory on Northflank before enabling it.
-- **Groq 429 / rate limit:** retried with backoff; raise `LLM_MIN_INTERVAL_SECONDS` if frequent.
+- **Groq 429 / rate limit:** per-minute limits are retried with backoff; raise
+  `LLM_MIN_INTERVAL_SECONDS` if they're frequent.
+- **`handed_off`: "the LLM provider's daily limit is used up"** — the provider's tokens-per-day
+  quota (Groq free tier: about 200k tokens, a rolling 24 hours) is spent. Production jobs and
+  live evals share it. Wait, or move to a paid tier.
 - **`403 repository is not on the allowlist`:** add the prefix to `ALLOWED_REPO_PREFIXES`.
 - **API returns 503 "API keys are not configured":** set `API_KEYS` on the service.
 
@@ -111,7 +115,7 @@ has no paging. `/metrics` exposes them as `gca_slo_met` for a scraper if one is 
 | Northflank API token | Northflank → Team → API tokens | GitHub secret `NORTHFLANK_API_KEY` |
 | GHCR pull token | GitHub → Developer settings → tokens | Northflank registry credentials |
 | Groq key | console.groq.com → API Keys | Northflank `GROQ_API_KEY` |
-| Agent GitHub token | GitHub → Developer settings → Fine-grained tokens | Northflank `GITHUB_TOKEN` |
+| Personal GitHub token (local development only; not set in production) | GitHub → Developer settings → Fine-grained tokens | local `.env` `GITHUB_TOKEN` |
 | A user's API key | generate a new key | Northflank `API_KEYS` (replace that user's entry) |
 | GitHub App private key | App settings → Private keys → Generate (then delete the old key) | Northflank `GITHUB_APP_PRIVATE_KEY` |
 | Langfuse keys | Langfuse → Project settings → API keys (create new, then delete old) | Northflank `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` |
@@ -119,3 +123,35 @@ has no paging. `/metrics` exposes them as `gca_slo_met` for a scraper if one is 
 | Session secret | `openssl rand -base64 48` (signs everyone out) | Northflank `SESSION_SECRET` |
 
 Redeploy after rotating runtime secrets.
+
+## Releasing
+
+1. Update `CHANGELOG.md`: move the `[Unreleased]` entries under a new `## [x.y.z] - date`, and
+   bump `version` in `pyproject.toml`.
+2. Merge to `main` and wait for the deploy to finish (it smoke-tests the new image).
+3. Tag that commit and push the tag: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
+4. The **Release** workflow tags the deployed image `ghcr.io/<owner>/governed-coding-agent:vX.Y.Z`
+   (the same image, no rebuild) and creates the GitHub Release from
+   `docs/releases/vX.Y.Z.md`.
+5. To roll back to a release, point Northflank at that image tag (see Manual rollback).
+
+## Production settings checklist
+
+Review before a release and after any incident:
+
+- **Required:**
+  - `APP_ENV=production`
+  - `ALLOWED_REPO_PREFIXES` set to your organisation only
+  - `SESSION_SECRET` of 32 or more characters, unique to production
+- **GitHub:** the App (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`) is configured, and
+  `GITHUB_TOKEN` is **not** set. The App is installed only on the repositories the agent should
+  touch.
+- **API access:** `API_KEYS` holds only keys still in use, each 24 or more random characters, and
+  `APPROVERS` matches them. Remove both if nobody uses the JSON API.
+- **Budgets:** `MAX_COST_PER_JOB_USD`, `DAILY_BUDGET_USD` and `JOB_TIMEOUT_SECONDS` are set
+  deliberately.
+- **Zitadel:**
+  - "Only authorized users can authenticate" is on
+  - roles are assigned only to the people who need them
+  - redirect URIs list only the production and local callbacks
+- **Rotation:** secrets older than your rotation period are rotated (table above).

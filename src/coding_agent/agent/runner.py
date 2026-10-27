@@ -111,15 +111,17 @@ def _score(tracing: Tracer, job_id: str, final: dict[str, Any]) -> None:
 
 
 async def _github_token(
-    settings: Settings, repo_url: str, job_id: str, audit_sink: AuditSink | None
+    settings: Settings, repo_url: str, job_id: str, audit_sink: AuditSink | None, *, write: bool
 ) -> str | None:
     """A one-hour, one-repository GitHub App token when the App is configured; otherwise the
-    personal token (local development, tests). Raises if the App is configured but can't issue
-    a token: falling back silently would push with the wrong identity."""
+    personal token (local development, tests). The coding run gets a read-only token: code the
+    agent writes runs during tests, so it must not hold a credential that could push. Raises if
+    the App is configured but can't issue a token: falling back silently would push with the
+    wrong identity."""
     app_id, key = settings.github_app_id, settings.app_private_key()
     if app_id is None or key is None or parse_github_repo(repo_url) is None:
         return settings.github_token.get_secret_value() if settings.github_token else None
-    issued = await asyncio.to_thread(installation_token, app_id, key, repo_url)
+    issued = await asyncio.to_thread(installation_token, app_id, key, repo_url, write=write)
     if audit_sink is not None:
         await audit_sink(
             {
@@ -129,7 +131,8 @@ async def _github_token(
                 "tool": None,
                 "allowed": True,
                 "args_masked": None,
-                "result_summary": f"GitHub App token for {issued.repository} "
+                "result_summary": f"GitHub App {'write' if write else 'read-only'} token for "
+                f"{issued.repository} "
                 f"(installation {issued.installation_id}, expires {issued.expires_at})",
                 "duration_ms": None,
             }
@@ -213,7 +216,7 @@ async def run_coding_job(
     ) as root:
         try:
             policy = _policy(settings)
-            github_token = await _github_token(settings, initial["repo_url"], job_id, audit_sink)
+            github_token = await _github_token(settings, initial["repo_url"], job_id, audit_sink, write=False)
             async with Toolbox.connect(
                 workspace,
                 job_id=job_id,
@@ -297,7 +300,9 @@ async def run_publish_job(
         metadata={"approved_by": request.approved_by},
     ) as root:
         try:
-            github_token = await _github_token(settings, request.repo_url, request.job_id, audit_sink)
+            github_token = await _github_token(
+                settings, request.repo_url, request.job_id, audit_sink, write=True
+            )
             async with Toolbox.connect(
                 workspace,
                 job_id=request.job_id,
