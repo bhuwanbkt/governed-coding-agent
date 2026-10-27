@@ -4,8 +4,9 @@ Flow (GitHub's documented App auth):
 
 1. Sign a JWT with the App's private key (RS256, valid for ~9 minutes).
 2. Look up the App's installation on the target repository.
-3. Exchange the JWT for an installation access token restricted to that one repository and to
-   `contents: write` + `pull_requests: write`. GitHub expires it after one hour.
+3. Exchange the JWT for an installation access token restricted to that one repository. The
+   coding run gets a **read-only** token (it only clones); only the publish run, after human
+   approval, gets `contents: write` + `pull_requests: write`. GitHub expires both after one hour.
 
 The token lives only in the job's MCP server environment and is never stored. Pushes and PRs are
 made by `<app-name>[bot]`, not by a person. Without App credentials the agent falls back to the
@@ -22,7 +23,8 @@ import httpx
 import jwt
 
 API = "https://api.github.com"
-PERMISSIONS = {"contents": "write", "pull_requests": "write", "metadata": "read"}
+PERMISSIONS = {"contents": "write", "pull_requests": "write", "metadata": "read"}  # publish run
+READ_ONLY_PERMISSIONS = {"contents": "read", "metadata": "read"}  # coding run: clone only
 
 
 class GitHubAppError(RuntimeError):
@@ -61,9 +63,10 @@ def installation_token(
     private_key: str,
     repo_url: str,
     *,
+    write: bool = True,
     client: httpx.Client | None = None,
 ) -> InstallationToken:
-    """Mint a one-hour token that can only push to and open PRs on `repo_url`."""
+    """Mint a one-hour token for `repo_url` only: read-only, or push + pull requests (`write`)."""
     repo = parse_github_repo(repo_url)
     if repo is None:
         raise GitHubAppError(f"not a github.com repository URL: {repo_url}")
@@ -83,7 +86,7 @@ def installation_token(
         created = http.post(
             f"/app/installations/{installation_id}/access_tokens",
             headers=headers,
-            json={"repositories": [name], "permissions": PERMISSIONS},
+            json={"repositories": [name], "permissions": PERMISSIONS if write else READ_ONLY_PERMISSIONS},
         )
         created.raise_for_status()
         body = created.json()

@@ -245,8 +245,12 @@ Run a job; its page shows **Trace in Langfuse**.
 - `/metrics` (Prometheus format) is off by default. To enable it, add a user to `API_KEYS` for
   the scraper (e.g. `metrics:<key>`) and set `METRICS_READERS=metrics`.
 
-## Coming in later phases
+## 12. Optional GitHub workflows
 
-| Phase | Setup needed |
-|---|---|
-| 6b | `GROQ_API_KEY` as a GitHub secret for the on-demand live eval workflow (see docs/evals.md) |
+These workflows are kept as templates so that changes to `.github/` stay a deliberate step. Copy
+each one in yourself:
+
+| Template | Copy to | Needs |
+|---|---|---|
+| `evals/ci/eval.yml` | `.github/workflows/eval.yml` | The repository secret `GROQ_API_KEY` (plus the Langfuse secrets to trace the run). Runs the live golden tasks on demand ([evals.md](evals.md)) |
+| `docs/ci/release.yml` | `.github/workflows/release.yml` | Nothing extra. On a `v*.*.*` tag it tags the deployed image and publishes the GitHub Release ([runbook](runbook.md#releasing)) |

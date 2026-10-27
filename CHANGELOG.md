@@ -5,6 +5,31 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-27
+
+First release. A governed multi-agent coding agent:
+- **Agents:** LangGraph agents plan, code, test and review a change in an allow-listed
+  repository.
+- **Control:** a policy file, budgets and an append-only audit log control every tool call.
+- **Human approval:** a person approves the exact patch before a GitHub App bot pushes it and
+  opens a pull request.
+- **Evaluation:** measured by golden tasks with hidden tests: 22 of 22 live attempts passed, with
+  0 safety violations.
+
+### Changed (release)
+- The coding run now gets a **read-only** GitHub App token. Only the publish run, after
+  approval, gets push and pull-request permissions. Code executed during tests can no longer
+  hold a token that could push.
+- README rewritten as a front page with results, the architecture and a 5-minute quick start. The
+  architecture doc is refreshed to the final design, with an index of all 14 ADRs.
+
+### Added (release)
+- `docs/threat-model.md`: assets, trust boundaries, 11 threats with their controls and residual
+  risks, known limitations and hardening for untrusted code.
+- Runbook: releasing, a production settings checklist, the provider daily limit.
+- Release workflow template (`docs/ci/release.yml`): tags the already-deployed image with the
+  version and publishes the GitHub Release from `docs/releases/`.
+
 ### Fixed (found by the first live eval)
 - A provider's *daily* token limit (Groq's TPD) now hands the job off at once with a clear
   reason instead of waiting and retrying; per-minute limits are still waited out.
@@ -131,3 +156,6 @@ versions follow [Semantic Versioning](https://semver.org/).
 - CI (lint, types, tests, migrations, security scans, Docker build) and CD to Northflank with
   smoke test and automatic rollback.
 - Repo hygiene: pre-commit, Dependabot, CODEOWNERS, issue/PR templates, ADRs, runbook.
+
+[Unreleased]: https://github.com/bhuwanbkt/governed-coding-agent/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/bhuwanbkt/governed-coding-agent/releases/tag/v1.0.0
