@@ -1,7 +1,14 @@
 """Job worker.
 
-Loop: recover stale jobs and expire old approvals -> publish one approved job, else code one
-queued job (unless today's LLM budget is spent) -> sleep.
+Loop: recover stale jobs and expire old approvals (when due) -> publish one approved job, else
+code one queued job (unless today's LLM budget is spent) -> sleep.
+
+- While idle, the worker embedded in the API doesn't poll: the routes that create work wake it
+  (`worker/wake.py`), and it otherwise sleeps until the next housekeeping deadline, the next UTC
+  midnight when the budget is spent, or the `worker_idle_seconds` backstop. So an idle service
+  sends no queries and Neon can scale to zero (ADR 0015). A standalone worker polls every
+  `worker_poll_seconds`.
+- Failed iterations back off exponentially, log one traceback, then a reminder every 10 minutes.
 
 - Claims use `FOR UPDATE SKIP LOCKED`, so several workers can run safely (ADR 0002).
 - While a job runs, a heartbeat updates `heartbeat_at`; if the worker dies, another worker's
@@ -18,7 +25,9 @@ import logging
 import os
 import signal
 import socket
+import time
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from coding_agent.agent.llm import ModelProvider
@@ -27,10 +36,13 @@ from coding_agent.agent.runner import JobRequest, run_coding_job, run_publish_jo
 from coding_agent.config import Settings
 from coding_agent.db import jobs as repo
 from coding_agent.observability.logging import job_id_var
+from coding_agent.worker.wake import WakeSignal
 
 logger = logging.getLogger(__name__)
 
 ModelFactory = Callable[[], ModelProvider | None]
+
+FAILURE_REMINDER_SECONDS = 600.0
 
 
 class Worker:
@@ -40,26 +52,106 @@ class Worker:
         *,
         worker_id: str | None = None,
         model_factory: ModelFactory | None = None,
+        wake: WakeSignal | None = None,
     ) -> None:
         self.settings = settings
         self.worker_id = worker_id or f"{socket.gethostname()}:{os.getpid()}"
         self._model_factory = model_factory or (lambda: None)  # None -> configured LLM
+        self._wake = wake  # None -> standalone worker: poll every worker_poll_seconds
         self._budget_warned = False
+        self._budget_blocked = False
+        self._housekeeping_at = 0.0  # monotonic time; 0 = due now
+        self._failures = 0
+        self._failing_since = 0.0
+        self._last_failure_log = 0.0
 
     # ------------------------------------------------------------------ loop
     async def run(self, stop: asyncio.Event) -> None:
-        logger.info("worker started", extra={"worker_id": self.worker_id})
-        while not stop.is_set():
-            try:
-                await self.recover_stale()
-                did_work = await self.process_one()
-            except Exception:
-                logger.exception("worker iteration failed")
-                did_work = False
-            if not did_work:
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(stop.wait(), timeout=self.settings.worker_poll_seconds)
+        logger.info(
+            "worker started",
+            extra={"worker_id": self.worker_id, "mode": "woken" if self._wake else "polling"},
+        )
+        if self._wake is not None:
+            self._wake.bind()
+        try:
+            while not stop.is_set():
+                try:
+                    if time.monotonic() >= self._housekeeping_at:
+                        await self.housekeep()
+                    did_work = await self.process_one()
+                except Exception:
+                    self._record_failure()
+                    await self._sleep(stop, self._error_backoff())
+                    continue
+                self._record_success()
+                if did_work:
+                    self._housekeeping_at = 0.0  # a job changed state: recompute deadlines
+                    continue
+                await self._sleep(stop, self.idle_wait())
+        finally:
+            if self._wake is not None:
+                self._wake.unbind()
         logger.info("worker stopped", extra={"worker_id": self.worker_id})
+
+    def idle_wait(self) -> float | None:
+        """Seconds to sleep with nothing to do; None = until woken."""
+        now = time.monotonic()
+        waits: list[float] = []
+        if self._wake is None:
+            waits.append(self.settings.worker_poll_seconds)
+        elif self.settings.worker_idle_seconds > 0:
+            waits.append(self.settings.worker_idle_seconds)
+        if self._housekeeping_at != float("inf"):
+            waits.append(max(self._housekeeping_at - now, 1.0))
+        if self._budget_blocked:
+            waits.append(_seconds_to_utc_midnight() + 1.0)
+        return min(waits) if waits else None
+
+    async def _sleep(self, stop: asyncio.Event, seconds: float | None) -> None:
+        if self._wake is not None:
+            await self._wake.wait(stop, seconds)
+            return
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=seconds)
+
+    def _error_backoff(self) -> float:
+        backoff = self.settings.worker_poll_seconds * 2 ** min(self._failures - 1, 16)
+        return float(min(backoff, self.settings.worker_error_backoff_max_seconds))
+
+    def _record_failure(self) -> None:
+        now = time.monotonic()
+        self._failures += 1
+        if self._failures == 1:
+            self._failing_since = self._last_failure_log = now
+            logger.exception("worker iteration failed; retrying with backoff")
+        elif now - self._last_failure_log >= FAILURE_REMINDER_SECONDS:
+            self._last_failure_log = now
+            logger.warning(
+                "worker still failing",
+                extra={"minutes": round((now - self._failing_since) / 60, 1), "attempts": self._failures},
+                exc_info=True,
+            )
+        else:
+            logger.debug("worker iteration failed again", exc_info=True)
+
+    def _record_success(self) -> None:
+        if self._failures:
+            logger.info(
+                "worker recovered",
+                extra={"minutes": round((time.monotonic() - self._failing_since) / 60, 1)},
+            )
+            self._failures = 0
+
+    async def housekeep(self) -> None:
+        """Recover stale jobs, expire old approvals, and work out when that's next needed."""
+        await self.recover_stale()
+        seconds = await asyncio.to_thread(
+            repo.seconds_until_housekeeping,
+            stale_after_seconds=self.settings.worker_stale_after_seconds,
+            ttl_hours=self.settings.approval_ttl_hours,
+        )
+        now = time.monotonic()
+        self._housekeeping_at = float("inf") if seconds is None else now + max(seconds, 1.0)
 
     async def recover_stale(self) -> None:
         recovered = await asyncio.to_thread(
@@ -191,7 +283,8 @@ class Worker:
         """New coding jobs wait in the queue once today's list-price LLM spend reaches the limit.
         Approved jobs are still published (publishing uses no LLM)."""
         spent = await asyncio.to_thread(repo.spend_today)
-        if spent < self.settings.daily_budget_usd:
+        self._budget_blocked = spent >= self.settings.daily_budget_usd
+        if not self._budget_blocked:
             self._budget_warned = False
             return True
         if not self._budget_warned:
@@ -232,13 +325,21 @@ class Worker:
             job_id_var.reset(token)
 
 
-async def run_worker_forever(settings: Settings, stop: asyncio.Event | None = None) -> None:
+async def run_worker_forever(
+    settings: Settings, stop: asyncio.Event | None = None, *, wake: WakeSignal | None = None
+) -> None:
     """Entry point for `coding-agent worker`, and for the worker embedded in the API process
-    (which passes its own `stop` event and leaves signal handling to uvicorn)."""
+    (which passes its own `stop` event and wake signal, and leaves signal handling to uvicorn)."""
     if stop is None:
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
                 loop.add_signal_handler(sig, stop.set)
-    await Worker(settings).run(stop)
+    await Worker(settings, wake=wake).run(stop)
+
+
+def _seconds_to_utc_midnight() -> float:
+    now = datetime.now(UTC)
+    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return (midnight - now).total_seconds()

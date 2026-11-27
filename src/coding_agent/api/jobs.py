@@ -13,6 +13,7 @@ from coding_agent.api.auth import CurrentUser
 from coding_agent.config import get_settings
 from coding_agent.db import jobs as repo
 from coding_agent.governance.repos import repo_url_problem
+from coding_agent.worker.wake import notify_worker
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -117,7 +118,7 @@ def submit_job(body: JobCreate, user: CurrentUser) -> repo.Job:
     settings = get_settings()
     if not settings.repo_allowed(body.repo_url):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "repository is not on the allowlist")
-    return repo.create_job(
+    job = repo.create_job(
         repo_url=body.repo_url,
         task=body.task,
         base_branch=body.base_branch,
@@ -125,6 +126,8 @@ def submit_job(body: JobCreate, user: CurrentUser) -> repo.Job:
         model=f"{settings.llm_provider}:{settings.llm_model}",
         requested_by=user,
     )
+    notify_worker()
+    return job
 
 
 @router.get("", response_model=list[JobSummary])
@@ -143,7 +146,7 @@ def decide(job_id: uuid.UUID, body: Decision, user: CurrentUser) -> repo.Job:
     only listed approvers may decide (if APPROVERS is set), and requests expire."""
     settings = get_settings()
     try:
-        return repo.record_decision(
+        job = repo.record_decision(
             job_id,
             decided_by=user,
             approve=body.decision == "approve",
@@ -158,6 +161,8 @@ def decide(job_id: uuid.UUID, body: Decision, user: CurrentUser) -> repo.Job:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from None
     except (repo.InvalidJobStateError, repo.DiffMismatchError) as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    notify_worker()  # approved: the worker publishes it; rejected: it's a harmless extra check
+    return job
 
 
 @router.get("/{job_id}/audit", response_model=list[AuditEvent])

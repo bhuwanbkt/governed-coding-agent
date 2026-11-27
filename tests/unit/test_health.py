@@ -46,3 +46,32 @@ def test_invalid_request_id_is_replaced(monkeypatch: pytest.MonkeyPatch) -> None
     response = _client().get("/version", headers={"X-Request-ID": "bad id\nwith newline"})
     assert response.headers["X-Request-ID"] != "bad id\nwith newline"
     assert len(response.headers["X-Request-ID"]) == 32
+
+
+def test_readyz_reuses_a_recent_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Frequent probes mustn't keep an idle Neon database awake."""
+    from coding_agent.api import main
+
+    calls: list[int] = []
+    monkeypatch.setattr(main, "ping", lambda: calls.append(1))
+    monkeypatch.setenv("READYZ_CACHE_SECONDS", "60")
+    client = _client()
+    for _ in range(5):
+        assert client.get("/readyz").json() == {"status": "ok", "database": "ok"}
+    assert len(calls) == 1
+
+
+def test_readyz_does_not_cache_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    from coding_agent.api import main
+
+    calls: list[int] = []
+
+    def down() -> None:
+        calls.append(1)
+        raise ConnectionError("down")
+
+    monkeypatch.setattr(main, "ping", down)
+    client = _client()
+    assert client.get("/readyz").status_code == 503
+    assert client.get("/readyz").status_code == 503
+    assert len(calls) == 2

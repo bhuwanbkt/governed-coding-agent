@@ -35,6 +35,23 @@ Northflank set the service image to `ghcr.io/<owner>/governed-coding-agent:<good
   **pooled** host (`-pooler`) and `sslmode=require`.
 - `database: not_configured` — `DATABASE_URL` secret missing on the Northflank service.
 
+## Neon compute allowance used up
+
+**Signs:** `/readyz` returns 503 with `database: unreachable`; the log shows "worker iteration
+failed; retrying with backoff", then "worker still failing" every 10 minutes; no new jobs or
+Langfuse traces. The Neon console shows a compute or quota warning.
+
+1. Confirm in the Neon console: Billing / Usage, and whether the compute is suspended.
+2. Wait for the monthly reset, or upgrade the plan. The worker recovers by itself ("worker
+   recovered"); no restart is needed.
+3. Find what kept the database awake. While idle the app should send no queries (ADR 0015):
+   - Northflank's health checks must use `/healthz`, not `/readyz`.
+   - `RUN_WORKER_IN_API=true`; a standalone worker polls every `WORKER_POLL_SECONDS`.
+   - `WORKER_IDLE_SECONDS` should be hours, not seconds.
+   - Something else holding connections: a scraper on `/metrics` or `/ui/ops`, or an open SQL
+     client.
+4. Turn on Neon's usage alerts so this shows up before it stops the database.
+
 ## Job stuck or failed
 
 Check `GET /jobs/{id}` (status, `error`, `attempts`) and `GET /jobs/{id}/audit` (last tool call).

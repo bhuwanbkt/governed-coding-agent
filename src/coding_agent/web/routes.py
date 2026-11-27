@@ -24,6 +24,7 @@ from coding_agent.db import ops
 from coding_agent.observability.tracing import tracer
 from coding_agent.web import session as web_session
 from coding_agent.web.oidc import OIDCClient, OIDCError, new_login_request
+from coding_agent.worker.wake import notify_worker
 
 router = APIRouter(include_in_schema=False)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -239,6 +240,7 @@ def submit_job(
         model=f"{settings.llm_provider}:{settings.llm_model}",
         requested_by=user.name,
     )
+    notify_worker()
     return RedirectResponse(f"/ui/jobs/{job.id}", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -325,4 +327,5 @@ def decide(
         return fail(str(exc), status.HTTP_403_FORBIDDEN)
     except (repo.InvalidJobStateError, repo.DiffMismatchError) as exc:
         return fail(str(exc), status.HTTP_409_CONFLICT)
+    notify_worker()
     return RedirectResponse(f"/ui/jobs/{job_id}", status_code=status.HTTP_303_SEE_OTHER)
