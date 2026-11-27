@@ -5,6 +5,16 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **An idle service no longer wakes the database.** The API wakes the embedded worker when a job
+  is submitted or approved. While idle, the worker sleeps until a housekeeping deadline, the
+  budget reset or a 6-hour backstop (`WORKER_IDLE_SECONDS`), so Neon can scale to zero. Before
+  this, polling every 3 seconds used up the free compute allowance (ADR 0015).
+- Failed worker iterations back off exponentially (`WORKER_ERROR_BACKOFF_MAX_SECONDS`) and log
+  one traceback, then a reminder every 10 minutes, instead of a traceback every 3 seconds.
+- `/readyz` reuses a successful database check for `READYZ_CACHE_SECONDS`. Platform health
+  checks should use `/healthz` (docs/setup.md).
+
 ## [1.0.0] - 2026-10-27
 
 First release. A governed multi-agent coding agent:

@@ -15,7 +15,8 @@ from coding_agent.config import get_settings
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Keep loggers created before migrations run (tests run Alembic in-process).
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = None  # migrations are hand-written SQL; no ORM autogenerate
 

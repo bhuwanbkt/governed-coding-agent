@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import secrets
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -46,8 +47,9 @@ def create_app() -> FastAPI:
         worker_task: asyncio.Task[None] | None = None
         if settings.run_worker_in_api:
             from coding_agent.worker.main import run_worker_forever
+            from coding_agent.worker.wake import wake_signal
 
-            worker_task = asyncio.create_task(run_worker_forever(settings, stop))
+            worker_task = asyncio.create_task(run_worker_forever(settings, stop, wake=wake_signal()))
             logger.info("embedded worker started")
         yield
         if worker_task is not None:
@@ -108,9 +110,14 @@ def create_app() -> FastAPI:
         """Liveness: the process is up. Never touches dependencies."""
         return {"status": "ok"}
 
+    last_ready = [float("-inf")]  # monotonic time of the last successful database check
+
     @app.get("/readyz", tags=["ops"], response_model=None)
     def readyz() -> dict[str, Any] | JSONResponse:
-        """Readiness: dependencies needed to serve traffic are reachable."""
+        """Readiness: dependencies needed to serve traffic are reachable. A success is reused for
+        `readyz_cache_seconds`, so probes alone don't keep an idle database awake."""
+        if time.monotonic() - last_ready[0] < settings.readyz_cache_seconds:
+            return {"status": "ok", "database": "ok"}
         try:
             ping()
         except DatabaseNotConfiguredError:
@@ -120,6 +127,7 @@ def create_app() -> FastAPI:
         except Exception:
             logger.exception("readiness check failed: database unreachable")
             return JSONResponse({"status": "unavailable", "database": "unreachable"}, status_code=503)
+        last_ready[0] = time.monotonic()
         return {"status": "ok", "database": "ok"}
 
     @app.get("/version", tags=["ops"])

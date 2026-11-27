@@ -191,3 +191,4 @@ See [evals.md](evals.md).
 | [0012](adr/0012-web-ui-and-oidc-sign-in.md) | Server-rendered UI with OIDC sign-in (Zitadel) |
 | [0013](adr/0013-tracing-and-ops-metrics.md) | Langfuse tracing per job; SLOs from Postgres |
 | [0014](adr/0014-evaluation-strategy.md) | Golden tasks graded by hidden tests; a labelled retrieval set |
+| [0015](adr/0015-idle-database-can-sleep.md) | The API wakes the worker; an idle database is never polled |

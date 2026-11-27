@@ -298,6 +298,31 @@ def expire_stale_approvals(*, ttl_hours: float) -> list[uuid.UUID]:
     return [r[0] for r in rows]
 
 
+def seconds_until_housekeeping(*, stale_after_seconds: int, ttl_hours: float) -> float | None:
+    """Seconds until `recover_stale_jobs` or `expire_stale_approvals` could next change a row,
+    by the database clock; None when no job is running, publishing or awaiting approval.
+
+    The worker sleeps until then instead of polling, so an idle database can scale to zero.
+    """
+    with get_engine().connect() as conn:
+        value = conn.execute(
+            text(
+                """
+                SELECT EXTRACT(EPOCH FROM MIN(due) - now()) FROM (
+                    SELECT heartbeat_at
+                        + make_interval(secs => CAST(:stale AS double precision)) AS due
+                    FROM jobs WHERE status IN ('running', 'publishing')
+                    UNION ALL
+                    SELECT updated_at + make_interval(secs => CAST(:ttl AS double precision))
+                    FROM jobs WHERE status = 'awaiting_approval'
+                ) AS deadlines
+                """
+            ),
+            {"stale": stale_after_seconds, "ttl": ttl_hours * 3600},
+        ).scalar_one()
+    return None if value is None else float(value)
+
+
 def spend_today() -> float:
     """List-price LLM cost of jobs created since midnight UTC."""
     with get_engine().connect() as conn:

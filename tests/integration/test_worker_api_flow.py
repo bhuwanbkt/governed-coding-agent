@@ -176,6 +176,24 @@ def test_stale_running_job_is_requeued_then_failed() -> None:
 
 
 @pytest.mark.usefixtures("env")
+def test_housekeeping_deadline_follows_the_running_job() -> None:
+    """The worker sleeps until this deadline instead of polling (ADR 0015)."""
+    repo.create_job(
+        repo_url="file:///nowhere",
+        task="t" * 10,
+        base_branch="main",
+        test_command="pytest -q",
+        model="fake",
+        requested_by="alice",
+    )
+    claimed = repo.claim_next("busy-worker", from_status="queued", to_status="running")
+    assert claimed is not None
+    seconds = repo.seconds_until_housekeeping(stale_after_seconds=300, ttl_hours=72)
+    assert seconds is not None and seconds <= 300  # heartbeat just set: stale in about 5 minutes
+    repo.update_job(claimed.id, actor="busy-worker", status="failed", error="test cleanup")
+
+
+@pytest.mark.usefixtures("env")
 def test_unknown_job_is_404() -> None:
     client = TestClient(create_app())
     assert client.get(f"/jobs/{uuid.uuid4()}", headers=ALICE).status_code == 404

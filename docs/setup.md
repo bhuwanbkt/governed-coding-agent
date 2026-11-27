@@ -69,7 +69,9 @@ The deploy job will stop at the Northflank step on this first run; that's expect
 2. **Service.** In your existing free project: **Create new → Service → Deployment**
    (deploy an external image) using `ghcr.io/bhuwanbkt/governed-coding-agent:latest`.
    - Port `8080`, HTTP, public.
-   - Health checks: liveness `GET /healthz`, readiness `GET /readyz`, port 8080.
+   - Health checks: liveness and readiness both `GET /healthz`, port 8080. Don't probe
+     `/readyz`: it queries the database, and frequent probes stop Neon from scaling to zero,
+     which uses up the free compute allowance (ADR 0015).
 3. **Runtime secrets** (service → Environment, or a secret group):
    - `APP_ENV=production`
    - `DATABASE_URL=` Neon **pooled** connection string

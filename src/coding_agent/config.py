@@ -104,6 +104,9 @@ class Settings(BaseSettings):
     git_author_email: str = "agent@users.noreply.github.com"
 
     # --- API & governance ------------------------------------------------------------
+    # /readyz reuses a successful database check for this long, so frequent probes don't keep
+    # the database awake. Point the platform's health checks at /healthz (docs/setup.md).
+    readyz_cache_seconds: float = 60.0
     # "alice:<key>,bob:<key>": each key maps to a user, so approvals have a real identity.
     api_keys: SecretStr | None = None
     # Comma-separated URL prefixes the agent may work on, e.g. "https://github.com/bhuwanbkt/".
@@ -111,7 +114,13 @@ class Settings(BaseSettings):
 
     # --- worker ----------------------------------------------------------------------
     run_worker_in_api: bool = False  # free tier: one service runs both API and worker
+    # A standalone worker (`coding-agent worker`) polls the queue this often while idle.
     worker_poll_seconds: float = 3.0
+    # The worker embedded in the API is woken by the routes that create work, so while idle it
+    # only checks this often, as a backstop (0 = never). Lets Neon scale to zero (ADR 0015).
+    worker_idle_seconds: float = 21600.0
+    # After a failed iteration (usually the database), wait poll * 2**n, up to this.
+    worker_error_backoff_max_seconds: float = 300.0
     worker_heartbeat_seconds: float = 15.0
     worker_stale_after_seconds: int = 300
     worker_max_claims: int = 3  # a job interrupted this many times is marked failed
@@ -168,6 +177,10 @@ class Settings(BaseSettings):
             raise ValueError("set both LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY, or neither")
         if not 0.0 <= self.langfuse_sample_rate <= 1.0:
             raise ValueError("LANGFUSE_SAMPLE_RATE must be between 0 and 1")
+        if min(self.worker_poll_seconds, self.worker_error_backoff_max_seconds) <= 0:
+            raise ValueError("WORKER_POLL_SECONDS and WORKER_ERROR_BACKOFF_MAX_SECONDS must be positive")
+        if self.worker_idle_seconds < 0 or self.readyz_cache_seconds < 0:
+            raise ValueError("WORKER_IDLE_SECONDS and READYZ_CACHE_SECONDS can't be negative")
         if self.max_cost_per_job_usd <= 0 or self.daily_budget_usd <= 0 or self.job_timeout_seconds <= 0:
             raise ValueError("budgets and the job timeout must be positive")
         return self
